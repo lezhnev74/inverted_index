@@ -40,6 +40,10 @@ File Layout:
 
 */
 
+var (
+	ErrDuplicateTerm = fmt.Errorf("duplicate term inserted")
+)
+
 // InvertedIndex is a single index piece consists of terms FST + sorted values for each term
 // resembles a sorted map[string][]int
 // NOT CONCURRENT
@@ -57,6 +61,7 @@ type InvertedIndex[V cmp.Ordered] struct {
 	fstBuilder   *vellum.Builder
 	bytesWritten uint32
 	segmentSize  int // in number of values in a segment
+	lastTerm     string
 
 	// read mode
 	fst       *vellum.FST
@@ -65,8 +70,8 @@ type InvertedIndex[V cmp.Ordered] struct {
 }
 
 type segmentIndexEntry[V constraints.Ordered] struct {
-	Offset, Len int64
-	Min         V
+	Offset int64
+	Min    V
 }
 
 func compressGob[T any](items []T) ([]byte, error) {
@@ -93,27 +98,30 @@ type InvertedIndexReader[V constraints.Ordered] interface {
 	ReadTerms() (lezhnev74.Iterator[string], error)
 	// ReadValues returns sorted iterator
 	ReadValues(terms []string, min V, max V) (lezhnev74.Iterator[V], error)
+	io.Closer
 }
 
 func (i *InvertedIndex[V]) Close() error {
-	// write FST
-	err := i.fstBuilder.Close()
-	if err != nil {
-		return fmt.Errorf("fst: %w", err)
-	}
+	if i.fstBuilder != nil { // only for writer mode
+		// write FST
+		err := i.fstBuilder.Close()
+		if err != nil {
+			return fmt.Errorf("fst: %w", err)
+		}
 
-	fstL, err := i.file.Write(i.fstBuf.Bytes())
-	if err != nil {
-		return fmt.Errorf("fst: failed writing: %w", err)
-	}
+		fstL, err := i.file.Write(i.fstBuf.Bytes())
+		if err != nil {
+			return fmt.Errorf("fst: failed writing: %w", err)
+		}
 
-	// write fst len
-	binary.BigEndian.PutUint32(i.lbuf, uint32(fstL))
-	_, err = i.file.Write(i.lbuf)
-	if err != nil {
-		return fmt.Errorf("fst: failed writing size: %w", err)
+		// write fst len
+		binary.BigEndian.PutUint32(i.lbuf, uint32(fstL))
+		_, err = i.file.Write(i.lbuf)
+		if err != nil {
+			return fmt.Errorf("fst: failed writing size: %w", err)
+		}
+		i.fstBuf = nil
 	}
-	i.fstBuf = nil
 
 	return i.file.Close()
 }
@@ -123,11 +131,17 @@ func (i *InvertedIndex[V]) Close() error {
 func (i *InvertedIndex[V]) Put(term string, values []V) error {
 
 	termValuesOffset := i.filePos
-	index := make([]segmentIndexEntry[V], len(values)/i.segmentSize+1)
+	index := make([]segmentIndexEntry[V], 0, len(values)/i.segmentSize+1)
+
+	if i.lastTerm == term {
+		return ErrDuplicateTerm
+	}
+	i.lastTerm = term
 
 	// write segments
 	for k := 0; k < len(values); k += i.segmentSize {
 
+		segmentOffset := i.filePos
 		segment := values[k:min(len(values), k+i.segmentSize)]
 		sbuf, err := i.serialize(segment) // todo: wasted allocation?
 		if err != nil {
@@ -141,7 +155,7 @@ func (i *InvertedIndex[V]) Put(term string, values []V) error {
 		i.filePos += int64(sl)
 
 		index = append(index, segmentIndexEntry[V]{
-			Offset: i.filePos,
+			Offset: segmentOffset,
 			Min:    segment[0],
 		})
 	}
@@ -186,14 +200,15 @@ func (i *InvertedIndex[V]) ReadValues(terms []string, minVal V, maxVal V) (lezhn
 	// make iterators for term's values
 	slices.Sort(terms)
 	fstIt, err := i.fst.Iterator([]byte(terms[0]), nil)
-	if err != nil {
+	if err != nil && !errors.Is(err, vellum.ErrIteratorDone) {
 		return nil, fmt.Errorf("fst: %w", err)
+	} else if errors.Is(err, vellum.ErrIteratorDone) {
+		return lezhnev74.NewSliceIterator([]V{}), nil
 	}
 
 	var (
 		offset, nextOffset uint64
 		existingTerm       []byte
-		segments           []segmentIndexEntry[V]
 		indexLen, n        int
 		closeFile          sync.Once
 	)
@@ -202,6 +217,8 @@ func (i *InvertedIndex[V]) ReadValues(terms []string, minVal V, maxVal V) (lezhn
 	iterators := make([]lezhnev74.Iterator[V], 0)
 
 	for _, term := range terms {
+
+		var segments []segmentIndexEntry[V]
 
 		// figure out term values offsets
 		err = fstIt.Seek([]byte(term))
@@ -220,7 +237,18 @@ func (i *InvertedIndex[V]) ReadValues(terms []string, minVal V, maxVal V) (lezhn
 		}
 
 		// read segment index
-		_, err = i.file.Seek(max(int64(nextOffset)-int64(len(buf)), int64(offset)), io.SeekStart)
+		readFrom := int64(-1)
+		valuesLen := nextOffset - offset
+		if int(valuesLen) < len(buf) {
+			// whole region fits in the buffer
+			buf = buf[:valuesLen]
+			readFrom = int64(offset)
+		} else {
+			// buffer only partially covers the region
+			readFrom = int64(nextOffset) - int64(len(buf))
+		}
+
+		_, err = i.file.Seek(readFrom, io.SeekStart)
 		if err != nil {
 			return nil, fmt.Errorf("reading values index: %w", err)
 		}
@@ -230,8 +258,10 @@ func (i *InvertedIndex[V]) ReadValues(terms []string, minVal V, maxVal V) (lezhn
 		}
 
 		indexLen = int(binary.BigEndian.Uint32(buf[n-sizeLen:]))
+		indexOffset := int64(nextOffset) - int64(sizeLen) - int64(indexLen)
+
 		if indexLen > n-sizeLen { // do we need to read more bytes?
-			_, err = i.file.Seek(int64(nextOffset)-int64(sizeLen)-int64(indexLen), io.SeekStart)
+			_, err = i.file.Seek(indexOffset, io.SeekStart)
 			if err != nil {
 				return nil, fmt.Errorf("reading values index: %w", err)
 			}
@@ -254,12 +284,15 @@ func (i *InvertedIndex[V]) ReadValues(terms []string, minVal V, maxVal V) (lezhn
 		// makeTermFetchFunc return a function that can be used in an iterator,
 		// upon calling the func it will return slices of sorted term's values
 		makeTermFetchFunc := func(term string) func() ([]V, error) {
-			var segmentBuf []byte
+			var (
+				segmentLen int64
+			)
+			segmentBuf := make([]byte, 4096)
 			si := 0
 
 			return func() ([]V, error) {
 				var s *segmentIndexEntry[V]
-				for ; si < len(segments); si++ {
+				for si < len(segments) {
 					if segments[si].Min < minVal || segments[si].Min > maxVal {
 						continue
 					}
@@ -269,16 +302,23 @@ func (i *InvertedIndex[V]) ReadValues(terms []string, minVal V, maxVal V) (lezhn
 				if s == nil {
 					return nil, lezhnev74.EmptyIterator
 				}
+				defer func() { si++ }()
 
 				_, err = i.file.Seek(s.Offset, io.SeekStart)
 				if err != nil {
 					return nil, fmt.Errorf("read values segment failed: %w", err)
 				}
 
-				if int64(len(segmentBuf)) < s.Len {
-					segmentBuf = make([]byte, s.Len)
+				if si == len(segments)-1 {
+					segmentLen = indexOffset - s.Offset // the last segment
 				} else {
-					segmentBuf = segmentBuf[:s.Len]
+					segmentLen = segments[si+1].Offset - s.Offset
+				}
+
+				if int64(cap(segmentBuf)) < segmentLen {
+					segmentBuf = make([]byte, segmentLen)
+				} else {
+					segmentBuf = segmentBuf[:segmentLen]
 				}
 
 				_, err = i.file.Read(segmentBuf)
@@ -314,8 +354,10 @@ func (i *InvertedIndex[V]) ReadValues(terms []string, minVal V, maxVal V) (lezhn
 }
 func (i *InvertedIndex[V]) ReadTerms() (lezhnev74.Iterator[string], error) {
 	it, err := i.fst.Iterator(nil, nil)
-	if err != nil {
+	if err != nil && !errors.Is(err, vellum.ErrIteratorDone) {
 		return nil, err
+	} else if errors.Is(err, vellum.ErrIteratorDone) {
+		return lezhnev74.NewSliceIterator([]string{}), nil
 	}
 
 	var lastErr error
