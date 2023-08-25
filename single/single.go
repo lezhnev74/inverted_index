@@ -286,24 +286,34 @@ func (i *InvertedIndex[V]) ReadValues(terms []string, minVal V, maxVal V) (lezhn
 		makeTermFetchFunc := func(term string) func() ([]V, error) {
 			var (
 				segmentLen int64
+				minS, maxS V
 			)
 			segmentBuf := make([]byte, 4096)
 			si := 0
 
-			return func() ([]V, error) {
-				var s *segmentIndexEntry[V]
-				for si < len(segments) {
-					if segments[si].Min < minVal || segments[si].Min > maxVal {
-						continue
-					}
-					s = &segments[si]
-					break
-				}
-				if s == nil {
+			var retFunc func() ([]V, error)
+			retFunc = func() ([]V, error) {
+				// validate the current segment
+				if si == len(segments) {
 					return nil, lezhnev74.EmptyIterator
 				}
-				defer func() { si++ }()
 
+				if segments[si].Min > maxVal {
+					return nil, lezhnev74.EmptyIterator // no further segments are good
+				}
+
+				minS = segments[si].Min
+				maxS = maxVal
+				if si < len(segments)-1 {
+					maxS = segments[si+1].Min
+				}
+				if minVal > maxS || maxVal < minS {
+					return nil, lezhnev74.EmptyIterator // no further segments are good
+				}
+
+				s := &segments[si]
+
+				// read the segment
 				_, err = i.file.Seek(s.Offset, io.SeekStart)
 				if err != nil {
 					return nil, fmt.Errorf("read values segment failed: %w", err)
@@ -330,8 +340,30 @@ func (i *InvertedIndex[V]) ReadValues(terms []string, minVal V, maxVal V) (lezhn
 				if err != nil {
 					return nil, fmt.Errorf("values: decompress fail: %w", err)
 				}
+
+				si++
+
+				// finally filter values in place with respect to the min/max scope
+				k := 0
+				for _, v := range values {
+					if v < minVal || v > maxVal {
+						continue
+					}
+					values[k] = v
+					k++
+				}
+				values = values[:k]
+
+				if len(values) == 0 {
+					// filtering revealed that this segment has no matching values,
+					// continue to the next segment:
+					return retFunc()
+				}
+
 				return values, nil
 			}
+
+			return retFunc
 		}
 
 		closeIterator := func() error {
@@ -451,58 +483,11 @@ func (i *InvertedIndex[V]) readFooter() error {
 	return nil
 }
 
-func (i *InvertedIndex[V]) readFst() error {
-	fstat, err := i.file.Stat()
-	if err != nil {
-		return err
-	}
-
-	buf := make([]byte, 4096)
-	fstSizeLen := 4 // uint32 size
-
-	minRead := min(fstat.Size(), int64(len(buf)))
-	_, err = i.file.Seek(-minRead, io.SeekEnd)
-	if err != nil {
-		return fmt.Errorf("fst: %w", err)
-	}
-
-	n, err := i.file.Read(buf)
-	if err != nil && !errors.Is(err, io.EOF) {
-		return fmt.Errorf("fst: %w", err)
-	}
-
-	if n < fstSizeLen {
-		return fmt.Errorf("fst: no length bytes found, probably corrupted")
-	}
-
-	fstLen := int(binary.BigEndian.Uint32(buf[n-fstSizeLen:])) // read the fst len from the end of the stream
-	if fstat.Size() < int64(fstLen+fstSizeLen) {
-		return fmt.Errorf("fst: unexpected file size, probably corrupted")
-	}
-
-	if fstLen > n-fstSizeLen { // do we need to read more bytes?
-		_, err := i.file.Seek(-int64(fstLen+fstSizeLen), io.SeekEnd)
-		if err != nil {
-			return err
-		}
-
-		buf = make([]byte, fstLen)
-		_, err = i.file.Read(buf)
-		if err != nil {
-			return err
-		}
-	} else {
-		buf = buf[:n-fstSizeLen]
-	}
-
-	i.fst, err = vellum.Load(buf[len(buf)-fstLen:]) // todo: use file for mmap io
-	if err != nil {
-		return fmt.Errorf("fst: load failed: %w", err)
-	}
-	return nil
-}
-
 func NewInvertedIndexUnit[V constraints.Ordered](filename string, segmentSize int) (InvertedIndexWriter[V], error) {
+	if segmentSize < 1 {
+		return nil, fmt.Errorf("the segment size is too small")
+	}
+
 	var err error
 	iiw := &InvertedIndex[V]{
 		fstBuf:      new(bytes.Buffer),
