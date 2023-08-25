@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"github.com/blevesearch/vellum"
 	"github.com/lezhnev74/go-iterators"
+	"github.com/ronanh/intcomp"
 	"golang.org/x/exp/constraints"
 	"golang.org/x/exp/slices"
 	"io"
@@ -20,23 +21,14 @@ import (
 
 File Layout:
 
-			   ┌────────────┬───────┬────────────┬───┬──────┐
-			   │term1 values│  ...  │termN values│FST│fstLEN│
-			   └────────────┴───────┴────────────┴───┴──────┘
-			  /                    \
-			 /                      \
-			/                        \
-		   /                          \
-		 ┌─────┬────────┬─────┬────────┐
-		 │index│segment1│ ... │segmentN│
-		 └─────┴────────┴─────┴────────┘
-		/       \
-	   /         \
-	  /           \
-	 /             \
-	┌────────┬─────┐
-	│indexLEN│index│
-	└────────┴─────┘
+           ┌──────────────────┬───────┬──────────────────┬──────┬────────┐
+           │ term1 values     │  ...  │   termN values   │ FST  │ FSTLEN │
+           └──────────────────┴───────┴──────────────────┴──────┴────────┘
+          /                    \
+         /                      \
+     ┌────────┬─────┬────────┬─────────┬────────┐
+     │segment1│ ... │segmentN│indexBody│IndexLen│
+     └────────┴─────┴────────┴─────────┴────────┘
 
 */
 
@@ -70,7 +62,7 @@ type InvertedIndex[V cmp.Ordered] struct {
 }
 
 type segmentIndexEntry[V constraints.Ordered] struct {
-	Offset int64
+	Offset int64 // uint64?
 	Min    V
 }
 
@@ -414,11 +406,49 @@ func (i *InvertedIndex[V]) ReadTerms() (lezhnev74.Iterator[string], error) {
 }
 
 func (i *InvertedIndex[V]) encodeSegmentsIndex(segmentsIndex []segmentIndexEntry[V]) ([]byte, error) {
-	// todo: apply columnar compression here
-	sbuf := new(bytes.Buffer)
-	enc := gob.NewEncoder(sbuf)
-	err := enc.Encode(segmentsIndex)
-	return sbuf.Bytes(), err
+
+	if len(segmentsIndex) == 0 {
+		return []byte{}, nil
+	}
+
+	// Note:
+	// A: encode all offsets as an array -> compress integers
+	// B: encode all min values with a user-provided compress function (as used in segments)
+	// layout: [sizeA(8),sizeB(8),encodedA(*),encodedB(*)]
+
+	sizeLen := 8 // int64
+	b := make([]byte, sizeLen)
+	offsets := make([]int64, len(segmentsIndex))
+	values := make([]V, len(segmentsIndex))
+
+	for k, s := range segmentsIndex {
+		offsets[k] = s.Offset
+		values[k] = s.Min
+	}
+
+	encodedOffsets := intcomp.CompressInt64(offsets, nil)
+	encodedValues, err := i.serialize(values)
+	if err != nil {
+		return nil, fmt.Errorf("index serialize failed: %w", err)
+	}
+
+	// lay out buffer:
+	out := make([]byte, 0, sizeLen+sizeLen+len(encodedOffsets)+len(encodedValues))
+
+	binary.BigEndian.PutUint64(b, uint64(len(encodedOffsets)*sizeLen)) // uint64 size
+	out = append(out, b...)
+
+	binary.BigEndian.PutUint64(b, uint64(len(encodedValues)))
+	out = append(out, b...)
+
+	for _, u := range encodedOffsets {
+		binary.BigEndian.PutUint64(b, u)
+		out = append(out, b...)
+	}
+
+	out = append(out, encodedValues...)
+
+	return out, nil
 }
 func (i *InvertedIndex[V]) decodeSegmentsIndex(data []byte) (index []segmentIndexEntry[V], err error) {
 	sbuf := bytes.NewBuffer(data)

@@ -14,6 +14,7 @@ require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/lezhnev74/go-iterators v0.0.0-20230815103529-8b788abba296 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
+	github.com/ronanh/intcomp v1.1.0 // indirect
 	golang.org/x/sys v0.1.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

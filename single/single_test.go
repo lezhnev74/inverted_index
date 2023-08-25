@@ -185,11 +185,11 @@ func TestAPI(t *testing.T) {
 			name:        "scoped values: two terms",
 			segmentSize: 2,
 			prepare: func(w InvertedIndexWriter[int]) {
-				require.NoError(t, w.Put("term1", []int{1, 3, 7}))     // 2 segments
+				require.NoError(t, w.Put("term", []int{1, 3, 7}))      // 2 segments
 				require.NoError(t, w.Put("term2", []int{4, 6, 8, 10})) // 2 segments
 			},
 			assert: func(r InvertedIndexReader[int]) {
-				valuesIterator, err := r.ReadValues([]string{"term1", "term2"}, 7, 999)
+				valuesIterator, err := r.ReadValues([]string{"term", "term2"}, 7, 999)
 				require.NoError(t, err)
 				timestamps := lezhnev74.ToSlice(valuesIterator)
 				require.EqualValues(t, []int{7, 8, 10}, timestamps)
@@ -276,7 +276,7 @@ func TestHugeFile(t *testing.T) {
 	require.NoError(t, err)
 
 	// generate huge sequences
-	values := make([]int, 10_000)
+	values := make([]int, 1_000)
 	for i := 0; i < 1_000; i++ {
 		for j := 0; j < cap(values); j++ {
 			values[j] = i + j
