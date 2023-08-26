@@ -4,12 +4,10 @@ import (
 	"bytes"
 	"cmp"
 	"encoding/binary"
-	"encoding/gob"
 	"errors"
 	"fmt"
 	"github.com/blevesearch/vellum"
 	"github.com/lezhnev74/go-iterators"
-	"github.com/ronanh/intcomp"
 	"golang.org/x/exp/constraints"
 	"golang.org/x/exp/slices"
 	"io"
@@ -40,14 +38,15 @@ var (
 // resembles a sorted map[string][]int
 // NOT CONCURRENT
 type InvertedIndex[V cmp.Ordered] struct {
-	file    *os.File
-	filePos int64
-	lbuf    []byte // len buf
+	file      *os.File
+	closeFile sync.Once
+	filePos   int64
+	lbuf      []byte // len buf
 
 	// Values
-	serialize   func(items []V) ([]byte, error)
-	unserialize func(data []byte) (items []V, err error)
-	cmp         func(a, b V) int // -1,0,1 to impose order on values
+	serializeSegment   func(items []V) ([]byte, error)
+	unserializeSegment func(data []byte) (items []V, err error)
+	cmp                func(a, b V) int // -1,0,1 to impose order on values
 
 	// write mode
 	fstBuilder   *vellum.Builder
@@ -59,25 +58,6 @@ type InvertedIndex[V cmp.Ordered] struct {
 	fst       *vellum.FST
 	fstBuf    *bytes.Buffer
 	fstOffset int64
-}
-
-type segmentIndexEntry[V constraints.Ordered] struct {
-	Offset int64 // uint64?
-	Min    V
-}
-
-func compressGob[T any](items []T) ([]byte, error) {
-	w := new(bytes.Buffer)
-	enc := gob.NewEncoder(w)
-	err := enc.Encode(items)
-	return w.Bytes(), err
-}
-
-func decompressGob[T any](data []byte) (items []T, err error) {
-	w := bytes.NewBuffer(data)
-	enc := gob.NewDecoder(w)
-	err = enc.Decode(&items)
-	return
 }
 
 type InvertedIndexWriter[V constraints.Ordered] interface {
@@ -115,7 +95,8 @@ func (i *InvertedIndex[V]) Close() error {
 		i.fstBuf = nil
 	}
 
-	return i.file.Close()
+	i.closeFile.Do(func() { i.file.Close() })
+	return nil
 }
 
 // Put writes our values to the file first, then update FST
@@ -135,7 +116,7 @@ func (i *InvertedIndex[V]) Put(term string, values []V) error {
 
 		segmentOffset := i.filePos
 		segment := values[k:min(len(values), k+i.segmentSize)]
-		sbuf, err := i.serialize(segment) // todo: wasted allocation?
+		sbuf, err := i.serializeSegment(segment) // todo: wasted allocation?
 		if err != nil {
 			return fmt.Errorf("serializing values segment failed: %w", err)
 		}
@@ -153,7 +134,7 @@ func (i *InvertedIndex[V]) Put(term string, values []V) error {
 	}
 
 	// write segments index
-	indexBuf, err := i.encodeSegmentsIndex(index)
+	indexBuf, err := encodeSegmentsIndex(index, i.serializeSegment)
 	if err != nil {
 		return fmt.Errorf("encoding segments index failed: %w", err)
 	}
@@ -202,7 +183,6 @@ func (i *InvertedIndex[V]) ReadValues(terms []string, minVal V, maxVal V) (lezhn
 		offset, nextOffset uint64
 		existingTerm       []byte
 		indexLen, n        int
-		closeFile          sync.Once
 	)
 	sizeLen := 4
 	buf := make([]byte, 4096)
@@ -267,13 +247,13 @@ func (i *InvertedIndex[V]) ReadValues(terms []string, minVal V, maxVal V) (lezhn
 			buf = buf[n-sizeLen-indexLen : n-sizeLen]
 		}
 
-		segments, err = i.decodeSegmentsIndex(buf)
+		segments, err = decodeSegmentsIndex(buf, i.unserializeSegment)
 		if err != nil {
 			return nil, fmt.Errorf("decoding values index: %w", err)
 		}
 
 		// Make a term iterator that scans through segments sequentially
-		// makeTermFetchFunc return a function that can be used in an iterator,
+		// makeTermFetchFunc returns a function that can be used in an iterator,
 		// upon calling the func it will return slices of sorted term's values
 		makeTermFetchFunc := func(term string) func() ([]V, error) {
 			var (
@@ -328,7 +308,7 @@ func (i *InvertedIndex[V]) ReadValues(terms []string, minVal V, maxVal V) (lezhn
 					return nil, fmt.Errorf("read values segment failed: %w", err)
 				}
 
-				values, err := i.unserialize(segmentBuf)
+				values, err := i.unserializeSegment(segmentBuf)
 				if err != nil {
 					return nil, fmt.Errorf("values: decompress fail: %w", err)
 				}
@@ -358,13 +338,14 @@ func (i *InvertedIndex[V]) ReadValues(terms []string, minVal V, maxVal V) (lezhn
 			return retFunc
 		}
 
+		termIterator := makeTermFetchFunc(term)
 		closeIterator := func() error {
-			closeFile.Do(func() { i.file.Close() })
+			i.closeFile.Do(func() { i.file.Close() })
 			return nil
 		}
 		iterators = append(
 			iterators,
-			lezhnev74.NewDynamicSliceIterator(makeTermFetchFunc(term), closeIterator),
+			lezhnev74.NewDynamicSliceIterator(termIterator, closeIterator),
 		)
 	}
 
@@ -403,80 +384,6 @@ func (i *InvertedIndex[V]) ReadTerms() (lezhnev74.Iterator[string], error) {
 		})
 
 	return itWrap, nil
-}
-
-func (i *InvertedIndex[V]) encodeSegmentsIndex(segmentsIndex []segmentIndexEntry[V]) ([]byte, error) {
-
-	if len(segmentsIndex) == 0 {
-		return []byte{}, nil
-	}
-
-	/*
-			Index Layout:
-		   ┌─────────────┬──────────┬─────────┐
-		   │OffsetsLen(8)│Offsets(*)│Values(*)│
-		   └─────────────┴──────────┴─────────┘
-	*/
-
-	sizeLen := 8 // int64
-	b := make([]byte, sizeLen)
-	offsets := make([]int64, len(segmentsIndex))
-	values := make([]V, len(segmentsIndex))
-
-	for k, s := range segmentsIndex {
-		offsets[k] = s.Offset
-		values[k] = s.Min
-	}
-
-	encodedOffsets := intcomp.CompressInt64(offsets, nil)
-	encodedValues, err := i.serialize(values)
-	if err != nil {
-		return nil, fmt.Errorf("index serialize failed: %w", err)
-	}
-
-	// lay out buffer:
-	out := make([]byte, 0, sizeLen+sizeLen+len(encodedOffsets)+len(encodedValues))
-
-	binary.BigEndian.PutUint64(b, uint64(len(encodedOffsets)*sizeLen)) // uint64 size
-	out = append(out, b...)
-
-	for _, u := range encodedOffsets {
-		binary.BigEndian.PutUint64(b, u)
-		out = append(out, b...)
-	}
-
-	out = append(out, encodedValues...)
-
-	return out, nil
-}
-
-func (i *InvertedIndex[V]) decodeSegmentsIndex(data []byte) (index []segmentIndexEntry[V], err error) {
-	if len(data) == 0 {
-		return nil, nil
-	}
-
-	sizeLen := 8
-
-	offsetsLen := int(binary.BigEndian.Uint64(data[:sizeLen]))
-
-	offsetsBuf := data[sizeLen : offsetsLen+sizeLen]
-	offsetsInts := make([]uint64, 0)
-	for i := 0; i < len(offsetsBuf); i += sizeLen {
-		offsetsInts = append(offsetsInts, binary.BigEndian.Uint64(offsetsBuf[i:i+sizeLen]))
-	}
-	offsets := intcomp.UncompressInt64(offsetsInts, nil)
-
-	valuesBuf := data[sizeLen+offsetsLen:]
-	values, err := i.unserialize(valuesBuf)
-	if err != nil {
-		return nil, fmt.Errorf("decode index failed: %w", err)
-	}
-
-	for i, offset := range offsets {
-		index = append(index, segmentIndexEntry[V]{Offset: offset, Min: values[i]})
-	}
-
-	return
 }
 
 func (i *InvertedIndex[V]) readFooter() error {
@@ -547,11 +454,11 @@ func NewInvertedIndexUnit[V constraints.Ordered](
 
 	var err error
 	iiw := &InvertedIndex[V]{
-		fstBuf:      new(bytes.Buffer),
-		lbuf:        make([]byte, 4),
-		serialize:   serializeValues,
-		unserialize: unserializeValues,
-		segmentSize: segmentSize,
+		fstBuf:             new(bytes.Buffer),
+		lbuf:               make([]byte, 4),
+		serializeSegment:   serializeValues,
+		unserializeSegment: unserializeValues,
+		segmentSize:        segmentSize,
 	}
 
 	iiw.file, err = os.OpenFile(filename, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
@@ -571,12 +478,12 @@ func OpenInvertedIndex[V constraints.Ordered](file string) (InvertedIndexReader[
 	}
 
 	i := &InvertedIndex[V]{
-		file:        f,
-		fstBuf:      new(bytes.Buffer),
-		lbuf:        make([]byte, 4),
-		serialize:   compressGob[V],
-		unserialize: decompressGob[V],
-		cmp:         lezhnev74.OrderedCmpFunc[V],
+		file:               f,
+		fstBuf:             new(bytes.Buffer),
+		lbuf:               make([]byte, 4),
+		serializeSegment:   compressGob[V],
+		unserializeSegment: decompressGob[V],
+		cmp:                lezhnev74.OrderedCmpFunc[V],
 	}
 
 	err = i.readFooter()
