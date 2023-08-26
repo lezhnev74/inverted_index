@@ -19,11 +19,11 @@ import (
 
 			File Layout:
 
-           ┌──────────────────┬───────┬──────────────────┬──────┬────────┐
-           │ term1 values     │  ...  │   termN values   │ FST  │ FSTLEN │
-           └──────────────────┴───────┴──────────────────┴──────┴────────┘
-          /                    \
-         /                      \
+           ┌──────────────┬─────┬──────────────┬─────┬────────┐
+           │ term1 values │ ... │ termN values │ FST │ FSTLEN │
+           └──────────────┴─────┴──────────────┴─────┴────────┘
+      ____/                \___________________
+     |                                         \
      ┌────────┬─────┬────────┬─────────┬────────┐
      │segment1│ ... │segmentN│indexBody│IndexLen│
      └────────┴─────┴────────┴─────────┴────────┘
@@ -207,14 +207,13 @@ func (i *InvertedIndex[V]) ReadValues(terms []string, minVal V, maxVal V) (lezhn
 		if err != nil {
 			return nil, fmt.Errorf("failed reading term values: %w", err)
 		}
+
 		closeIterator := func() error {
 			i.closeFile.Do(func() { i.file.Close() })
 			return nil
 		}
-		iterators = append(
-			iterators,
-			lezhnev74.NewDynamicSliceIterator(termFetchFunc, closeIterator),
-		)
+
+		iterators = append(iterators, lezhnev74.NewDynamicSliceIterator(termFetchFunc, closeIterator))
 	}
 
 	// make a selection tree

@@ -5,11 +5,14 @@ import (
 	"github.com/blevesearch/vellum"
 	lezhnev74 "github.com/lezhnev74/go-iterators"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/exp/rand"
+	"golang.org/x/exp/slices"
 	"io"
 	"math"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestAPI(t *testing.T) {
@@ -276,12 +279,23 @@ func TestHugeFile(t *testing.T) {
 	require.NoError(t, err)
 
 	// generate huge sequences
+	rand.Seed(uint64(time.Now().UnixNano()))
+	terms := make([]string, 10_000)
+	sample := make([]string, 0)
+	for i := 0; i < len(terms); i++ {
+		terms[i] = fmt.Sprintf("%030d", rand.Uint64())
+		if rand.Int()%101 == 0 {
+			sample = append(sample, terms[i])
+		}
+	}
+	slices.Sort(terms)
+
 	values := make([]int, 1_000)
-	for i := 0; i < 1_000; i++ {
+	for i := 0; i < len(terms); i++ {
 		for j := 0; j < cap(values); j++ {
 			values[j] = i + j
 		}
-		require.NoError(t, indexWriter.Put(fmt.Sprintf("term%04d", i), values))
+		require.NoError(t, indexWriter.Put(terms[i], values))
 	}
 
 	// report file size
@@ -298,13 +312,20 @@ func TestHugeFile(t *testing.T) {
 	// Count total terms in the index
 	it, err := indexReader.ReadTerms()
 	require.NoError(t, err)
-	require.Equal(t, 1_000, len(lezhnev74.ToSlice(it)))
+	allTerms := lezhnev74.ToSlice(it)
+	require.Equal(t, 10_000, len(allTerms))
+
+	// Read sampled terms
+	for _, ts := range sample {
+		require.Contains(t, allTerms, ts)
+	}
 
 	// Read some values
-	it2, err := indexReader.ReadValues([]string{"term1234", "term8521", "term9129"}, 0, 1_000_000)
+	it2, err := indexReader.ReadValues(sample[:1], 0, 1_000_000)
 	require.NoError(t, err)
 
-	lezhnev74.ToSlice(it2)
+	v := lezhnev74.ToSlice(it2)
+	require.Equal(t, 1_000, len(v))
 
 	require.NoError(t, indexReader.Close())
 }
