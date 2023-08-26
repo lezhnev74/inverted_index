@@ -19,7 +19,7 @@ import (
 
 /**
 
-File Layout:
+			File Layout:
 
            ┌──────────────────┬───────┬──────────────────┬──────┬────────┐
            │ term1 values     │  ...  │   termN values   │ FST  │ FSTLEN │
@@ -411,10 +411,12 @@ func (i *InvertedIndex[V]) encodeSegmentsIndex(segmentsIndex []segmentIndexEntry
 		return []byte{}, nil
 	}
 
-	// Note:
-	// A: encode all offsets as an array -> compress integers
-	// B: encode all min values with a user-provided compress function (as used in segments)
-	// layout: [sizeA(8),sizeB(8),encodedA(*),encodedB(*)]
+	/*
+			Index Layout:
+		   ┌─────────────┬──────────┬─────────┐
+		   │OffsetsLen(8)│Offsets(*)│Values(*)│
+		   └─────────────┴──────────┴─────────┘
+	*/
 
 	sizeLen := 8 // int64
 	b := make([]byte, sizeLen)
@@ -438,9 +440,6 @@ func (i *InvertedIndex[V]) encodeSegmentsIndex(segmentsIndex []segmentIndexEntry
 	binary.BigEndian.PutUint64(b, uint64(len(encodedOffsets)*sizeLen)) // uint64 size
 	out = append(out, b...)
 
-	binary.BigEndian.PutUint64(b, uint64(len(encodedValues)))
-	out = append(out, b...)
-
 	for _, u := range encodedOffsets {
 		binary.BigEndian.PutUint64(b, u)
 		out = append(out, b...)
@@ -450,10 +449,33 @@ func (i *InvertedIndex[V]) encodeSegmentsIndex(segmentsIndex []segmentIndexEntry
 
 	return out, nil
 }
+
 func (i *InvertedIndex[V]) decodeSegmentsIndex(data []byte) (index []segmentIndexEntry[V], err error) {
-	sbuf := bytes.NewBuffer(data)
-	enc := gob.NewDecoder(sbuf)
-	err = enc.Decode(&index)
+	if len(data) == 0 {
+		return nil, nil
+	}
+
+	sizeLen := 8
+
+	offsetsLen := int(binary.BigEndian.Uint64(data[:sizeLen]))
+
+	offsetsBuf := data[sizeLen : offsetsLen+sizeLen]
+	offsetsInts := make([]uint64, 0)
+	for i := 0; i < len(offsetsBuf); i += sizeLen {
+		offsetsInts = append(offsetsInts, binary.BigEndian.Uint64(offsetsBuf[i:i+sizeLen]))
+	}
+	offsets := intcomp.UncompressInt64(offsetsInts, nil)
+
+	valuesBuf := data[sizeLen+offsetsLen:]
+	values, err := i.unserialize(valuesBuf)
+	if err != nil {
+		return nil, fmt.Errorf("decode index failed: %w", err)
+	}
+
+	for i, offset := range offsets {
+		index = append(index, segmentIndexEntry[V]{Offset: offset, Min: values[i]})
+	}
+
 	return
 }
 
@@ -513,7 +535,12 @@ func (i *InvertedIndex[V]) readFooter() error {
 	return nil
 }
 
-func NewInvertedIndexUnit[V constraints.Ordered](filename string, segmentSize int) (InvertedIndexWriter[V], error) {
+func NewInvertedIndexUnit[V constraints.Ordered](
+	filename string,
+	segmentSize int,
+	serializeValues func([]V) ([]byte, error),
+	unserializeValues func([]byte) ([]V, error),
+) (InvertedIndexWriter[V], error) {
 	if segmentSize < 1 {
 		return nil, fmt.Errorf("the segment size is too small")
 	}
@@ -522,8 +549,8 @@ func NewInvertedIndexUnit[V constraints.Ordered](filename string, segmentSize in
 	iiw := &InvertedIndex[V]{
 		fstBuf:      new(bytes.Buffer),
 		lbuf:        make([]byte, 4),
-		serialize:   compressGob[V],
-		unserialize: decompressGob[V],
+		serialize:   serializeValues,
+		unserialize: unserializeValues,
 		segmentSize: segmentSize,
 	}
 

@@ -204,7 +204,7 @@ func TestAPI(t *testing.T) {
 			defer os.RemoveAll(dirPath)
 			filename := filepath.Join(dirPath, "index")
 
-			indexWriter, err := NewInvertedIndexUnit[int](filename, tt.segmentSize)
+			indexWriter, err := NewInvertedIndexUnit[int](filename, tt.segmentSize, compressGob[int], decompressGob[int])
 			require.NoError(t, err)
 			tt.prepare(indexWriter)
 			err = indexWriter.Close()
@@ -224,7 +224,7 @@ func TestReaderClosesBeforeIteratorIsCompleteFile(t *testing.T) {
 	filename := filepath.Join(dirPath, "index")
 
 	// 1. Make a new index (open in writer mode), put values and close.
-	indexWriter, err := NewInvertedIndexUnit[int](filename, 1)
+	indexWriter, err := NewInvertedIndexUnit[int](filename, 1, compressGob[int], decompressGob[int])
 	require.NoError(t, err)
 	require.NoError(t, indexWriter.Put("term1", []int{10, 20})) // <-- two segments will be written (len=1)
 	err = indexWriter.Close()
@@ -248,7 +248,7 @@ func TestClosedIteratorClosesTheFile(t *testing.T) {
 	filename := filepath.Join(dirPath, "index")
 
 	// 1. Make a new index (open in writer mode), put values and close.
-	indexWriter, err := NewInvertedIndexUnit[int](filename, 1)
+	indexWriter, err := NewInvertedIndexUnit[int](filename, 1, compressGob[int], decompressGob[int])
 	require.NoError(t, err)
 	require.NoError(t, indexWriter.Put("term1", []int{10, 20})) // <-- two segments will be written (len=1)
 	err = indexWriter.Close()
@@ -272,7 +272,7 @@ func TestHugeFile(t *testing.T) {
 	filename := filepath.Join(dirPath, "index")
 
 	// 1. Make a new index (open in writer mode), put values and close.
-	indexWriter, err := NewInvertedIndexUnit[int](filename, 100)
+	indexWriter, err := NewInvertedIndexUnit[int](filename, 100, compressGob[int], decompressGob[int])
 	require.NoError(t, err)
 
 	// generate huge sequences
