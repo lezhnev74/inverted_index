@@ -182,17 +182,12 @@ func (i *InvertedIndex[V]) ReadValues(terms []string, minVal V, maxVal V) (lezhn
 	var (
 		offset, nextOffset uint64
 		existingTerm       []byte
-		indexLen, n        int
 	)
-	sizeLen := 4
-	buf := make([]byte, 4096)
 	iterators := make([]lezhnev74.Iterator[V], 0)
 
 	for _, term := range terms {
 
-		var segments []segmentIndexEntry[V]
-
-		// figure out term values offsets
+		// figure out term values file region
 		err = fstIt.Seek([]byte(term))
 		existingTerm, offset = fstIt.Current()
 		if slices.Compare(existingTerm, []byte(term)) != 0 {
@@ -208,144 +203,17 @@ func (i *InvertedIndex[V]) ReadValues(terms []string, minVal V, maxVal V) (lezhn
 			_, nextOffset = fstIt.Current()
 		}
 
-		// read segment index
-		readFrom := int64(-1)
-		valuesLen := nextOffset - offset
-		if int(valuesLen) < len(buf) {
-			// whole region fits in the buffer
-			buf = buf[:valuesLen]
-			readFrom = int64(offset)
-		} else {
-			// buffer only partially covers the region
-			readFrom = int64(nextOffset) - int64(len(buf))
-		}
-
-		_, err = i.file.Seek(readFrom, io.SeekStart)
+		termFetchFunc, err := i.makeTermValuesFetchFunc(term, offset, nextOffset, minVal, maxVal)
 		if err != nil {
-			return nil, fmt.Errorf("reading values index: %w", err)
+			return nil, fmt.Errorf("failed reading term values: %w", err)
 		}
-		n, err = i.file.Read(buf)
-		if err != nil {
-			return nil, fmt.Errorf("reading values index: %w", err)
-		}
-
-		indexLen = int(binary.BigEndian.Uint32(buf[n-sizeLen:]))
-		indexOffset := int64(nextOffset) - int64(sizeLen) - int64(indexLen)
-
-		if indexLen > n-sizeLen { // do we need to read more bytes?
-			_, err = i.file.Seek(indexOffset, io.SeekStart)
-			if err != nil {
-				return nil, fmt.Errorf("reading values index: %w", err)
-			}
-
-			buf = make([]byte, indexLen)
-			_, err = i.file.Read(buf)
-			if err != nil {
-				return nil, fmt.Errorf("reading values index: %w", err)
-			}
-		} else {
-			buf = buf[n-sizeLen-indexLen : n-sizeLen]
-		}
-
-		segments, err = decodeSegmentsIndex(buf, i.unserializeSegment)
-		if err != nil {
-			return nil, fmt.Errorf("decoding values index: %w", err)
-		}
-
-		// Make a term iterator that scans through segments sequentially
-		// makeTermFetchFunc returns a function that can be used in an iterator,
-		// upon calling the func it will return slices of sorted term's values
-		makeTermFetchFunc := func(term string) func() ([]V, error) {
-			var (
-				segmentLen int64
-				minS, maxS V
-			)
-			segmentBuf := make([]byte, 4096)
-			si := 0
-
-			var retFunc func() ([]V, error)
-			retFunc = func() ([]V, error) {
-				// validate the current segment
-				if si == len(segments) {
-					return nil, lezhnev74.EmptyIterator
-				}
-
-				if segments[si].Min > maxVal {
-					return nil, lezhnev74.EmptyIterator // no further segments are good
-				}
-
-				minS = segments[si].Min
-				maxS = maxVal
-				if si < len(segments)-1 {
-					maxS = segments[si+1].Min
-				}
-				if minVal > maxS || maxVal < minS {
-					return nil, lezhnev74.EmptyIterator // no further segments are good
-				}
-
-				s := &segments[si]
-
-				// read the segment
-				_, err = i.file.Seek(s.Offset, io.SeekStart)
-				if err != nil {
-					return nil, fmt.Errorf("read values segment failed: %w", err)
-				}
-
-				if si == len(segments)-1 {
-					segmentLen = indexOffset - s.Offset // the last segment
-				} else {
-					segmentLen = segments[si+1].Offset - s.Offset
-				}
-
-				if int64(cap(segmentBuf)) < segmentLen {
-					segmentBuf = make([]byte, segmentLen)
-				} else {
-					segmentBuf = segmentBuf[:segmentLen]
-				}
-
-				_, err = i.file.Read(segmentBuf)
-				if err != nil {
-					return nil, fmt.Errorf("read values segment failed: %w", err)
-				}
-
-				values, err := i.unserializeSegment(segmentBuf)
-				if err != nil {
-					return nil, fmt.Errorf("values: decompress fail: %w", err)
-				}
-
-				si++
-
-				// finally filter values in place with respect to the min/max scope
-				k := 0
-				for _, v := range values {
-					if v < minVal || v > maxVal {
-						continue
-					}
-					values[k] = v
-					k++
-				}
-				values = values[:k]
-
-				if len(values) == 0 {
-					// filtering revealed that this segment has no matching values,
-					// continue to the next segment:
-					return retFunc()
-				}
-
-				return values, nil
-			}
-
-			return retFunc
-		}
-
-		termIterator := makeTermFetchFunc(term)
 		closeIterator := func() error {
 			i.closeFile.Do(func() { i.file.Close() })
 			return nil
 		}
 		iterators = append(
 			iterators,
-			lezhnev74.NewDynamicSliceIterator(termIterator, closeIterator),
+			lezhnev74.NewDynamicSliceIterator(termFetchFunc, closeIterator),
 		)
 	}
 
@@ -440,6 +308,149 @@ func (i *InvertedIndex[V]) readFooter() error {
 	}
 
 	return nil
+}
+
+func (i *InvertedIndex[V]) makeTermValuesFetchFunc(
+	term string,
+	offset, nextOffset uint64,
+	minVal, maxVal V,
+) (func() ([]V, error), error) {
+	var indexLen, n int
+	sizeLen := 4
+	buf := make([]byte, 4096)
+	valuesLen := nextOffset - offset
+	var segments []segmentIndexEntry[V]
+
+	// read segment index
+	readFrom := int64(-1)
+	if int(valuesLen) < len(buf) {
+		// whole region fits in the buffer
+		buf = buf[:valuesLen]
+		readFrom = int64(offset)
+	} else {
+		// buffer only partially covers the region
+		readFrom = int64(nextOffset) - int64(len(buf))
+	}
+
+	_, err := i.file.Seek(readFrom, io.SeekStart)
+	if err != nil {
+		return nil, fmt.Errorf("reading values index: %w", err)
+	}
+	n, err = i.file.Read(buf)
+	if err != nil {
+		return nil, fmt.Errorf("reading values index: %w", err)
+	}
+
+	indexLen = int(binary.BigEndian.Uint32(buf[n-sizeLen:]))
+	indexOffset := int64(nextOffset) - int64(sizeLen) - int64(indexLen)
+
+	if indexLen > n-sizeLen { // do we need to read more bytes?
+		_, err = i.file.Seek(indexOffset, io.SeekStart)
+		if err != nil {
+			return nil, fmt.Errorf("reading values index: %w", err)
+		}
+
+		buf = make([]byte, indexLen)
+		_, err = i.file.Read(buf)
+		if err != nil {
+			return nil, fmt.Errorf("reading values index: %w", err)
+		}
+	} else {
+		buf = buf[n-sizeLen-indexLen : n-sizeLen]
+	}
+
+	segments, err = decodeSegmentsIndex(buf, i.unserializeSegment)
+	if err != nil {
+		return nil, fmt.Errorf("decoding values index: %w", err)
+	}
+
+	// Make a term iterator that scans through segments sequentially
+	// makeTermFetchFunc returns a function that can be used in an iterator,
+	// upon calling the func it will return slices of sorted term's values
+	makeTermFetchFunc := func(term string) func() ([]V, error) {
+		var (
+			segmentLen int64
+			minS, maxS V
+		)
+		segmentBuf := make([]byte, 4096)
+		si := 0
+
+		var retFunc func() ([]V, error)
+		retFunc = func() ([]V, error) {
+			// validate the current segment
+			if si == len(segments) {
+				return nil, lezhnev74.EmptyIterator
+			}
+
+			if segments[si].Min > maxVal {
+				return nil, lezhnev74.EmptyIterator // no further segments are good
+			}
+
+			minS = segments[si].Min
+			maxS = maxVal
+			if si < len(segments)-1 {
+				maxS = segments[si+1].Min
+			}
+			if minVal > maxS || maxVal < minS {
+				return nil, lezhnev74.EmptyIterator // no further segments are good
+			}
+
+			s := &segments[si]
+
+			// read the segment
+			_, err = i.file.Seek(s.Offset, io.SeekStart)
+			if err != nil {
+				return nil, fmt.Errorf("read values segment failed: %w", err)
+			}
+
+			if si == len(segments)-1 {
+				segmentLen = indexOffset - s.Offset // the last segment
+			} else {
+				segmentLen = segments[si+1].Offset - s.Offset
+			}
+
+			if int64(cap(segmentBuf)) < segmentLen {
+				segmentBuf = make([]byte, segmentLen)
+			} else {
+				segmentBuf = segmentBuf[:segmentLen]
+			}
+
+			_, err = i.file.Read(segmentBuf)
+			if err != nil {
+				return nil, fmt.Errorf("read values segment failed: %w", err)
+			}
+
+			values, err := i.unserializeSegment(segmentBuf)
+			if err != nil {
+				return nil, fmt.Errorf("values: decompress fail: %w", err)
+			}
+
+			si++
+
+			// finally filter values in place with respect to the min/max scope
+			k := 0
+			for _, v := range values {
+				if v < minVal || v > maxVal {
+					continue
+				}
+				values[k] = v
+				k++
+			}
+			values = values[:k]
+
+			if len(values) == 0 {
+				// filtering revealed that this segment has no matching values,
+				// continue to the next segment:
+				return retFunc()
+			}
+
+			return values, nil
+		}
+
+		return retFunc
+	}
+
+	return makeTermFetchFunc(term), nil
 }
 
 func NewInvertedIndexUnit[V constraints.Ordered](
