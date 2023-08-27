@@ -15,6 +15,28 @@ type segmentIndexEntry[V constraints.Ordered] struct {
 	Min    V
 }
 
+func compressUint32(items []uint32) ([]byte, error) {
+	b := make([]byte, 4)
+	encoded := intcomp.CompressUint32(items, nil)
+	out := make([]byte, 0, len(encoded)*4)
+	for _, u := range encoded {
+		binary.BigEndian.PutUint32(b[:4], u)
+		out = append(out, b[:4]...)
+	}
+
+	return out, nil
+}
+
+func decompressUint32(data []byte) (items []uint32, err error) {
+	valueInts := make([]uint32, 0)
+	for i := 0; i < len(data); i += 4 {
+		valueInts = append(valueInts, binary.BigEndian.Uint32(data[i:i+4]))
+	}
+	items = intcomp.UncompressUint32(valueInts, nil)
+
+	return
+}
+
 func compressGob[T any](items []T) ([]byte, error) {
 	w := new(bytes.Buffer)
 	enc := gob.NewEncoder(w)

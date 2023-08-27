@@ -18,7 +18,7 @@ import (
 func TestAPI(t *testing.T) {
 	type test struct {
 		name        string
-		segmentSize int
+		segmentSize uint32
 		prepare     func(w InvertedIndexWriter[int])
 		assert      func(r InvertedIndexReader[int])
 	}
@@ -213,11 +213,32 @@ func TestAPI(t *testing.T) {
 			err = indexWriter.Close()
 			require.NoError(t, err)
 
-			indexReader, err := OpenInvertedIndex[int](filename)
+			indexReader, err := OpenInvertedIndex[int](filename, decompressGob[int])
 			require.NoError(t, err)
 			tt.assert(indexReader)
 		})
 	}
+}
+func TestUseUint32Compression(t *testing.T) {
+	dirPath, err := os.MkdirTemp("", "")
+	require.NoError(t, err)
+	defer os.RemoveAll(dirPath)
+	filename := filepath.Join(dirPath, "index")
+
+	// 1. Make a new index (open in writer mode), put values and close.
+	indexWriter, err := NewInvertedIndexUnit[uint32](filename, 1, compressUint32, decompressUint32)
+	require.NoError(t, err)
+	require.NoError(t, indexWriter.Put("term1", []uint32{10, 20})) // <-- two segments will be written (len=1)
+	err = indexWriter.Close()
+	require.NoError(t, err)
+
+	// 2. Open the index in a reader-mode
+	indexReader, err := OpenInvertedIndex[uint32](filename, decompressUint32)
+	require.NoError(t, err)
+	it, err := indexReader.ReadValues([]string{"term1"}, 0, 100)
+	require.NoError(t, err)
+	values := lezhnev74.ToSlice(it)
+	require.EqualValues(t, []uint32{10, 20}, values)
 }
 
 func TestReaderClosesBeforeIteratorIsCompleteFile(t *testing.T) {
@@ -234,7 +255,7 @@ func TestReaderClosesBeforeIteratorIsCompleteFile(t *testing.T) {
 	require.NoError(t, err)
 
 	// 2. Open the index in a reader-mode
-	indexReader, err := OpenInvertedIndex[int](filename)
+	indexReader, err := OpenInvertedIndex[int](filename, decompressGob[int])
 	require.NoError(t, err)
 	it, err := indexReader.ReadValues([]string{"term1"}, 0, 100)
 	require.NoError(t, err)
@@ -258,7 +279,7 @@ func TestClosedIteratorClosesTheFile(t *testing.T) {
 	require.NoError(t, err)
 
 	// 2. Open the index in a reader-mode
-	indexReader, err := OpenInvertedIndex[int](filename)
+	indexReader, err := OpenInvertedIndex[int](filename, decompressGob[int])
 	require.NoError(t, err)
 	it, err := indexReader.ReadValues([]string{"term1"}, 0, 100)
 	require.NoError(t, err)
@@ -275,7 +296,7 @@ func TestHugeFile(t *testing.T) {
 	filename := filepath.Join(dirPath, "index")
 
 	// 1. Make a new index (open in writer mode), put values and close.
-	indexWriter, err := NewInvertedIndexUnit[int](filename, 100, compressGob[int], decompressGob[int])
+	indexWriter, err := NewInvertedIndexUnit[uint32](filename, 100, compressUint32, decompressUint32)
 	require.NoError(t, err)
 
 	// generate huge sequences
@@ -290,23 +311,23 @@ func TestHugeFile(t *testing.T) {
 	}
 	slices.Sort(terms)
 
-	values := make([]int, 1_000)
+	values := make([]uint32, 1_000)
 	for i := 0; i < len(terms); i++ {
-		for j := 0; j < cap(values); j++ {
-			values[j] = i + j
+		for j := 0; j < len(values); j++ {
+			values[j] = rand.Uint32()
 		}
 		require.NoError(t, indexWriter.Put(terms[i], values))
 	}
 
 	// report file size
-	s, _ := indexWriter.(*InvertedIndex[int]).file.Stat()
+	s, _ := indexWriter.(*InvertedIndex[uint32]).file.Stat()
 	fmt.Printf("file size: %d bytes\n", s.Size())
 
 	err = indexWriter.Close()
 	require.NoError(t, err)
 
 	// 2. Open the index in a reader-mode
-	indexReader, err := OpenInvertedIndex[int](filename)
+	indexReader, err := OpenInvertedIndex[uint32](filename, decompressUint32)
 	require.NoError(t, err)
 
 	// Count total terms in the index
@@ -321,7 +342,7 @@ func TestHugeFile(t *testing.T) {
 	}
 
 	// Read some values
-	it2, err := indexReader.ReadValues(sample[:1], 0, 1_000_000)
+	it2, err := indexReader.ReadValues(sample[:1], 0, math.MaxUint32)
 	require.NoError(t, err)
 
 	v := lezhnev74.ToSlice(it2)

@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"github.com/RoaringBitmap/roaring"
 	"github.com/blevesearch/vellum"
 	"github.com/lezhnev74/go-iterators"
 	"golang.org/x/exp/constraints"
@@ -38,10 +39,10 @@ var (
 // resembles a sorted map[string][]int
 // NOT CONCURRENT
 type InvertedIndex[V cmp.Ordered] struct {
-	file      *os.File
-	closeFile sync.Once
-	filePos   int64
-	lbuf      []byte // len buf
+	file       *os.File
+	closeFile  sync.Once
+	filePos    int64
+	buf4, buf8 []byte // len buf
 
 	// Values
 	serializeSegment   func(items []V) ([]byte, error)
@@ -49,10 +50,12 @@ type InvertedIndex[V cmp.Ordered] struct {
 	cmp                func(a, b V) int // -1,0,1 to impose order on values
 
 	// write mode
-	fstBuilder   *vellum.Builder
-	bytesWritten uint32
-	segmentSize  int // in number of values in a segment
-	lastTerm     string
+	fstBuilder        *vellum.Builder
+	bytesWritten      uint32
+	segmentSize       uint32 // in number of values in a segment
+	lastTerm          string
+	termsValues       [][]V // temporary values for each term
+	valuesIndexOffset int64 // remember for the footer layout
 
 	// read mode
 	fst       *vellum.FST
@@ -75,84 +78,78 @@ type InvertedIndexReader[V constraints.Ordered] interface {
 
 func (i *InvertedIndex[V]) Close() error {
 	if i.fstBuilder != nil { // only for writer mode
-		// write FST
+
 		err := i.fstBuilder.Close()
 		if err != nil {
 			return fmt.Errorf("fst: %w", err)
 		}
 
+		allValues := i.getAllTermValues()
+
+		termBitmaps := i.mapTermValuesToBitmaps(allValues)
+		i.termsValues = nil // free up
+
+		err = i.writeAllValues(allValues)
+		if err != nil {
+			return fmt.Errorf("writing all values failed: %w", err)
+		}
+		allValues = nil // free up
+
+		err = i.writeTermsBitmapsAndUpdateFST(termBitmaps)
+		if err != nil {
+			return fmt.Errorf("writing bitmaps failed: %w", err)
+		}
+
+		// write FST
 		fstL, err := i.file.Write(i.fstBuf.Bytes())
 		if err != nil {
 			return fmt.Errorf("fst: failed writing: %w", err)
 		}
 
-		// write fst len
-		binary.BigEndian.PutUint32(i.lbuf, uint32(fstL))
-		_, err = i.file.Write(i.lbuf)
+		binary.BigEndian.PutUint32(i.buf4, uint32(fstL))
+		_, err = i.file.Write(i.buf4)
 		if err != nil {
 			return fmt.Errorf("fst: failed writing size: %w", err)
 		}
-		i.fstBuf = nil
+		i.fstBuf = nil // free up
+
+		// write the footer
+		binary.BigEndian.PutUint32(i.buf4, i.segmentSize)
+		_, err = i.file.Write(i.buf4)
+		if err != nil {
+			return fmt.Errorf("failed writing segment size: %w", err)
+		}
+
+		buf8 := make([]byte, 8)
+		binary.BigEndian.PutUint64(buf8, uint64(i.valuesIndexOffset))
+		_, err = i.file.Write(i.buf4)
+		if err != nil {
+			return fmt.Errorf("failed writing index offset: %w", err)
+		}
+
+		return nil
 	}
 
 	i.closeFile.Do(func() { i.file.Close() })
 	return nil
 }
 
-// Put writes our values to the file first, then update FST
-// split all values into segments to optimize reading
+// Put remembers all terms and its values, actual writing is delayed until Close()
 func (i *InvertedIndex[V]) Put(term string, values []V) error {
-
-	termValuesOffset := i.filePos
-	index := make([]segmentIndexEntry[V], 0, len(values)/i.segmentSize+1)
 
 	if i.lastTerm == term {
 		return ErrDuplicateTerm
 	}
 	i.lastTerm = term
 
-	// write segments
-	for k := 0; k < len(values); k += i.segmentSize {
-
-		segmentOffset := i.filePos
-		segment := values[k:min(len(values), k+i.segmentSize)]
-		sbuf, err := i.serializeSegment(segment) // todo: wasted allocation?
-		if err != nil {
-			return fmt.Errorf("serializing values segment failed: %w", err)
-		}
-
-		sl, err := i.file.Write(sbuf)
-		if err != nil {
-			return err
-		}
-		i.filePos += int64(sl)
-
-		index = append(index, segmentIndexEntry[V]{
-			Offset: segmentOffset,
-			Min:    segment[0],
-		})
-	}
-
-	// write segments index
-	indexBuf, err := encodeSegmentsIndex(index, i.serializeSegment)
+	err := i.fstBuilder.Insert([]byte(term), uint64(len(i.termsValues)))
 	if err != nil {
-		return fmt.Errorf("encoding segments index failed: %w", err)
+		return err
 	}
 
-	n, err := i.file.Write(indexBuf)
-	if err != nil {
-		return fmt.Errorf("failed writing values index: %w", err)
-	}
-	i.filePos += int64(n)
+	i.termsValues = append(i.termsValues, values)
 
-	binary.BigEndian.PutUint32(i.lbuf, uint32(n))
-	n, err = i.file.Write(i.lbuf)
-	if err != nil {
-		return fmt.Errorf("failed writing values index size for: %w", err)
-	}
-	i.filePos += int64(n)
-
-	return i.fstBuilder.Insert([]byte(term), uint64(termValuesOffset))
+	return nil
 }
 
 func (i *InvertedIndex[V]) ReadValues(terms []string, minVal V, maxVal V) (lezhnev74.Iterator[V], error) {
@@ -452,9 +449,139 @@ func (i *InvertedIndex[V]) makeTermValuesFetchFunc(
 	return makeTermFetchFunc(term), nil
 }
 
+func (i *InvertedIndex[V]) getAllTermValues() []V {
+	totalNum := 0
+	for _, tv := range i.termsValues {
+		totalNum += len(tv)
+	}
+
+	allValues := make([]V, totalNum/2) // to avoid many allocations, start with 50% of total
+	for _, tv := range i.termsValues {
+		for _, v := range tv {
+			if slices.Contains(allValues, v) {
+				continue
+			}
+			allValues = append(allValues, v)
+		}
+	}
+	slices.Sort(allValues)
+
+	return allValues
+}
+
+func (i *InvertedIndex[V]) mapTermValuesToBitmaps(allValues []V) []*roaring.Bitmap {
+	tb := make([]*roaring.Bitmap, 0, len(i.termsValues)) // bitmaps per term
+	pv := make([]uint32, 0)                              // term value positions for the bitmap
+
+	for _, tv := range i.termsValues {
+		pv = pv[:0]
+		for _, v := range tv {
+			p, _ := slices.BinarySearch(allValues, v)
+			pv = append(pv, uint32(p))
+		}
+		b := roaring.BitmapOf(pv...)
+		tb = append(tb, b)
+	}
+
+	return tb
+}
+
+func (i *InvertedIndex[V]) writeAllValues(values []V) error {
+	index := make([]segmentIndexEntry[V], 0, len(values)/int(i.segmentSize)+1)
+
+	// write segments
+	for k := 0; k < len(values); k += int(i.segmentSize) {
+
+		segmentOffset := i.filePos
+		segment := values[k:min(len(values), k+int(i.segmentSize))]
+		sbuf, err := i.serializeSegment(segment) // todo: wasted allocation?
+		if err != nil {
+			return fmt.Errorf("serializing values segment failed: %w", err)
+		}
+
+		sl, err := i.file.Write(sbuf)
+		if err != nil {
+			return err
+		}
+		i.filePos += int64(sl)
+
+		index = append(index, segmentIndexEntry[V]{
+			Offset: segmentOffset,
+			Min:    segment[0],
+		})
+	}
+
+	// write segments index
+	indexBuf, err := encodeSegmentsIndex(index, i.serializeSegment)
+	if err != nil {
+		return fmt.Errorf("encoding segments index failed: %w", err)
+	}
+
+	n, err := i.file.Write(indexBuf)
+	if err != nil {
+		return fmt.Errorf("failed writing values index: %w", err)
+	}
+	i.valuesIndexOffset = i.filePos
+	i.filePos += int64(n)
+
+	binary.BigEndian.PutUint32(i.buf4, uint32(n))
+	n, err = i.file.Write(i.buf4)
+	if err != nil {
+		return fmt.Errorf("failed writing values index size for: %w", err)
+	}
+	i.filePos += int64(n)
+
+	return nil
+}
+
+func (i *InvertedIndex[V]) writeTermsBitmapsAndUpdateFST(bitmaps []*roaring.Bitmap) error {
+	// use our existing fst to iterate through terms in the same order as they were ingested
+	fst, err := vellum.Load(i.fstBuf.Bytes())
+	if err != nil {
+		return fmt.Errorf("fst read failed: %w", err)
+	}
+
+	termsIt, err := fst.Iterator(nil, nil)
+	if err != nil {
+		return fmt.Errorf("fst iterator failed: %w", err)
+	}
+
+	// here we create a new FST with actual bitmap offsets
+	// since we can't update the existing FST build with term numbers
+	i.fstBuilder, err = vellum.New(i.fstBuf, nil)
+	var n int64
+	for {
+		t, tn := termsIt.Current() // the value is the index of a term
+		err = i.fstBuilder.Insert(t, uint64(i.filePos))
+		if err != nil {
+			return err
+		}
+
+		// write the bitmap
+		n, err = bitmaps[tn].WriteTo(i.file) // the index of a bitmap is the same as the term in FST
+		if err != nil {
+			return err
+		}
+		i.filePos += n
+
+		err = termsIt.Next()
+		if err != nil && errors.Is(err, vellum.ErrIteratorDone) {
+			break
+		} else if err != nil {
+			return fmt.Errorf("fst iteration failed: %w", err)
+		}
+	}
+	err = i.fstBuilder.Close()
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func NewInvertedIndexUnit[V constraints.Ordered](
 	filename string,
-	segmentSize int,
+	segmentSize uint32,
 	serializeValues func([]V) ([]byte, error),
 	unserializeValues func([]byte) ([]V, error),
 ) (InvertedIndexWriter[V], error) {
@@ -465,7 +592,8 @@ func NewInvertedIndexUnit[V constraints.Ordered](
 	var err error
 	iiw := &InvertedIndex[V]{
 		fstBuf:             new(bytes.Buffer),
-		lbuf:               make([]byte, 4),
+		buf4:               make([]byte, 4),
+		buf8:               make([]byte, 8),
 		serializeSegment:   serializeValues,
 		unserializeSegment: unserializeValues,
 		segmentSize:        segmentSize,
@@ -481,7 +609,10 @@ func NewInvertedIndexUnit[V constraints.Ordered](
 	return iiw, err
 }
 
-func OpenInvertedIndex[V constraints.Ordered](file string) (InvertedIndexReader[V], error) {
+func OpenInvertedIndex[V constraints.Ordered](
+	file string,
+	unserializeValues func([]byte) ([]V, error),
+) (InvertedIndexReader[V], error) {
 	f, err := os.Open(file)
 	if err != nil {
 		return nil, err
@@ -490,9 +621,8 @@ func OpenInvertedIndex[V constraints.Ordered](file string) (InvertedIndexReader[
 	i := &InvertedIndex[V]{
 		file:               f,
 		fstBuf:             new(bytes.Buffer),
-		lbuf:               make([]byte, 4),
-		serializeSegment:   compressGob[V],
-		unserializeSegment: decompressGob[V],
+		buf4:               make([]byte, 4),
+		unserializeSegment: unserializeValues,
 		cmp:                lezhnev74.OrderedCmpFunc[V],
 	}
 
