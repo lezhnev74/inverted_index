@@ -26,16 +26,6 @@ func TestAPI(t *testing.T) {
 	tests := []test{
 		// ---- TERMS RELATED
 		{
-			name:        "empty index",
-			segmentSize: 1000,
-			prepare:     func(w InvertedIndexWriter[int]) {},
-			assert: func(r InvertedIndexReader[int]) {
-				termsIterator, err := r.ReadTerms()
-				require.NoError(t, err)
-				terms := lezhnev74.ToSlice(termsIterator)
-				require.Empty(t, terms)
-			},
-		}, {
 			name:        "duplicate terms",
 			segmentSize: 1000,
 			prepare: func(w InvertedIndexWriter[int]) {
@@ -89,11 +79,13 @@ func TestAPI(t *testing.T) {
 		},
 		// ---- VALUES RELATED
 		{
-			name:        "read values from empty index",
+			name:        "read values from index with no postings",
 			segmentSize: 1000,
-			prepare:     func(w InvertedIndexWriter[int]) {},
+			prepare: func(w InvertedIndexWriter[int]) {
+				require.NoError(t, w.Put("term", []int{}))
+			},
 			assert: func(r InvertedIndexReader[int]) {
-				it, err := r.ReadValues([]string{"term1"}, 0, 100)
+				it, err := r.ReadValues([]string{"term"}, 0, 100)
 				require.NoError(t, err)
 				terms := lezhnev74.ToSlice(it)
 				require.Empty(t, terms)
@@ -106,18 +98,6 @@ func TestAPI(t *testing.T) {
 			},
 			assert: func(r InvertedIndexReader[int]) {
 				it, err := r.ReadValues([]string{"UNKNOWN"}, 0, 100)
-				require.NoError(t, err)
-				terms := lezhnev74.ToSlice(it)
-				require.Empty(t, terms)
-			},
-		}, {
-			name:        "read empty values from index",
-			segmentSize: 1000,
-			prepare: func(w InvertedIndexWriter[int]) {
-				require.NoError(t, w.Put("term", []int{}))
-			},
-			assert: func(r InvertedIndexReader[int]) {
-				it, err := r.ReadValues([]string{"term"}, 0, 100)
 				require.NoError(t, err)
 				terms := lezhnev74.ToSlice(it)
 				require.Empty(t, terms)
@@ -263,6 +243,19 @@ func TestReaderClosesBeforeIteratorIsCompleteFile(t *testing.T) {
 	require.NoError(t, indexReader.Close())
 	_, err = it.Next()
 	require.ErrorIs(t, err, os.ErrClosed)
+}
+
+func TestUnableToCreateEmptyIndex(t *testing.T) {
+	dirPath, err := os.MkdirTemp("", "")
+	require.NoError(t, err)
+	defer os.RemoveAll(dirPath)
+	filename := filepath.Join(dirPath, "index")
+
+	// 1. Make a new index (open in writer mode), put values and close.
+	indexWriter, err := NewInvertedIndexUnit[int](filename, 1, compressGob[int], decompressGob[int])
+	require.NoError(t, err)
+	err = indexWriter.Close()
+	require.ErrorIs(t, err, ErrEmptyIndex)
 }
 
 func TestClosedIteratorClosesTheFile(t *testing.T) {
