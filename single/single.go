@@ -135,68 +135,42 @@ func (i *InvertedIndex[V]) ReadValues(terms []string, minVal V, maxVal V) (lezhn
 		return lezhnev74.NewSliceIterator([]V{}), nil
 	}
 
-	// Note 1:
-	// for every term makes a sorted iterator for values
-	// joins all iterators to a unique selection tree
-	// effectively all values are sorted now
+	// Note:
+	// Read all terms bitmaps and join into one.
+	// Use it to select segments for reading.
 
-	// Note 2:
-	// To find one term's values boundary we need to use the offset from FST as the start
-	// and the next term's offset as the end.
-
-	// make iterators for term's values
-	slices.Sort(terms)
-	fstIt, err := i.fst.Iterator([]byte(terms[0]), nil)
-	if err != nil && !errors.Is(err, vellum.ErrIteratorDone) {
-		return nil, fmt.Errorf("fst: %w", err)
-	} else if errors.Is(err, vellum.ErrIteratorDone) {
+	bs, err := i.readBitmaps(terms)
+	if err != nil {
+		return nil, fmt.Errorf("bitmaps: %w", err)
+	}
+	if len(bs) == 0 {
 		return lezhnev74.NewSliceIterator([]V{}), nil
 	}
 
-	var (
-		offset, nextOffset uint64
-		existingTerm       []byte
-	)
-	iterators := make([]lezhnev74.Iterator[V], 0)
-
-	for _, term := range terms {
-
-		// figure out term values file region
-		err = fstIt.Seek([]byte(term))
-		existingTerm, offset = fstIt.Current()
-		if slices.Compare(existingTerm, []byte(term)) != 0 {
-			continue // term is not in the index
-		}
-
-		err = fstIt.Next()
-		if err != nil && !errors.Is(err, vellum.ErrIteratorDone) {
-			return nil, fmt.Errorf("fst: %w", err)
-		} else if errors.Is(err, vellum.ErrIteratorDone) {
-			nextOffset = uint64(i.fstOffset)
-		} else {
-			_, nextOffset = fstIt.Current()
-		}
-
-		termFetchFunc, err := i.makeTermValuesFetchFunc(term, offset, nextOffset, minVal, maxVal)
-		if err != nil {
-			return nil, fmt.Errorf("failed reading term values: %w", err)
-		}
-
-		closeIterator := func() error {
-			i.closeFile.Do(func() { i.file.Close() })
-			return nil
-		}
-
-		iterators = append(iterators, lezhnev74.NewDynamicSliceIterator(termFetchFunc, closeIterator))
+	b := bs[0]
+	for j := 1; j < len(bs); j++ {
+		b.And(bs[j])
 	}
 
-	// make a selection tree
-	tree := lezhnev74.NewSliceIterator([]V{})
-	for _, it := range iterators {
-		tree = lezhnev74.NewUniqueSelectingIterator(tree, it, lezhnev74.OrderedCmpFunc[V])
+	segmentsIndex, err := i.readValuesIndex()
+	if err != nil {
+		return nil, fmt.Errorf("read values index: %w", err)
 	}
 
-	return tree, nil
+	segmentsIndex = i.selectSegments(segmentsIndex, b, minVal, maxVal)
+
+	valuesFetchFunc, err := i.makeSegmentsFetchFunc(segmentsIndex, b, minVal, maxVal)
+	if err != nil {
+		return nil, fmt.Errorf("failed reading term values: %w", err)
+	}
+
+	closeIterator := func() error {
+		i.closeFile.Do(func() { i.file.Close() })
+		return nil
+	}
+	it := lezhnev74.NewDynamicSliceIterator(valuesFetchFunc, closeIterator)
+
+	return it, nil
 }
 
 func (i *InvertedIndex[V]) ReadTerms() (lezhnev74.Iterator[string], error) {
@@ -630,6 +604,222 @@ func (i *InvertedIndex[V]) write() error {
 	}
 
 	return nil
+}
+
+func (i *InvertedIndex[V]) readBitmaps(terms []string) ([]*roaring.Bitmap, error) {
+	slices.Sort(terms)
+	fstIt, err := i.fst.Iterator([]byte(terms[0]), nil)
+	if err != nil && !errors.Is(err, vellum.ErrIteratorDone) {
+		return nil, fmt.Errorf("read fst: %w", err)
+	} else if errors.Is(err, vellum.ErrIteratorDone) {
+		return nil, nil
+	}
+
+	var (
+		offset, nextOffset uint64
+		bitmapLen          int
+		existingTerm       []byte
+	)
+
+	bitmaps := make([]*roaring.Bitmap, 0, len(terms))
+	buf := make([]byte, 4096)
+	//bbuf := bytes.NewBuffer(buf)
+
+	for _, term := range terms {
+
+		// figure out term's bitmap file region
+		err = fstIt.Seek([]byte(term))
+		if err != nil {
+			return nil, fmt.Errorf("fst seek term: %w", err)
+		}
+		existingTerm, offset = fstIt.Current()
+		if slices.Compare(existingTerm, []byte(term)) != 0 {
+			continue // the term is not in the index
+		}
+
+		err = fstIt.Next()
+		if err != nil && !errors.Is(err, vellum.ErrIteratorDone) {
+			return nil, fmt.Errorf("fst read: %w", err)
+		} else if errors.Is(err, vellum.ErrIteratorDone) {
+			nextOffset = uint64(i.fstOffset) // the last bitmap abuts FST
+		} else {
+			_, nextOffset = fstIt.Current()
+		}
+
+		// read the bitmap
+		_, err = i.file.Seek(int64(offset), io.SeekStart)
+		if err != nil {
+			return nil, fmt.Errorf("seek bitmap: %w", err)
+		}
+
+		bitmapLen = int(nextOffset - offset)
+		if cap(buf) >= bitmapLen {
+			buf = buf[:bitmapLen]
+		} else {
+			buf = make([]byte, bitmapLen)
+		}
+
+		//_, err = i.file.Read(buf)
+		//if err != nil {
+		//	return nil, fmt.Errorf("read bitmap: %w", err)
+		//}
+
+		b := roaring.New()
+		_, err = b.ReadFrom(i.file)
+		if err != nil {
+			return nil, fmt.Errorf("parse bitmap: %w", err)
+		}
+		bitmaps = append(bitmaps, b)
+	}
+
+	return bitmaps, nil
+}
+
+func (i *InvertedIndex[V]) readValuesIndex() (index []segmentIndexEntry[V], err error) {
+	buf := make([]byte, 0)
+
+	_, err = i.file.Seek(i.indexOffset, io.SeekStart)
+	if err != nil {
+		return nil, fmt.Errorf("seek: %w", err)
+	}
+
+	_, err = i.file.Read(i.buf8)
+	if err != nil {
+		return nil, fmt.Errorf("reading index len: %w", err)
+	}
+
+	index, err = decodeSegmentsIndex(buf, i.unserializeSegment)
+	if err != nil {
+		return nil, fmt.Errorf("decoding values index: %w", err)
+	}
+
+	return
+}
+
+func (i *InvertedIndex[V]) selectSegments(index []segmentIndexEntry[V], b *roaring.Bitmap, minVal V, maxVal V) []segmentIndexEntry[V] {
+	// Note: preselection returns only segments that potentially can contain relevant values
+	// Based on min/max values and the terms bitmap
+
+	// Filter out segments based on bitmap
+	k := 0
+	for j := 0; j < len(index); j++ {
+		if !b.IntersectsWithInterval(uint64(j*int(i.segmentSize)), uint64((j+1)*int(i.segmentSize))) {
+			continue
+		}
+		index[k] = index[j]
+	}
+	index = index[:k]
+
+	// Filter out based on min/max values
+	var minSegV, maxSegV V
+	k = 0
+	for j := 0; j < len(index); j++ {
+		minSegV = index[j].Min
+		maxSegV = maxVal
+		if (j + 1) < len(index) {
+			maxSegV = index[j+1].Min
+		}
+		if minVal >= maxSegV || maxVal < minSegV {
+			continue
+		}
+		index[k] = index[j]
+	}
+	index = index[:k]
+
+	return index
+}
+
+func (i *InvertedIndex[V]) makeSegmentsFetchFunc(
+	segments []segmentIndexEntry[V],
+	b *roaring.Bitmap,
+	minVal V,
+	maxVal V,
+) (func() ([]V, error), error) {
+	// Make an iterator that scans through segments sequentially
+	// Returns a function that can be used in a slice fetching iterator,
+	// upon calling the func it will return slices of sorted values
+	makeFetchFunc := func() func() ([]V, error) {
+		var segmentLen int64
+		segmentBuf := make([]byte, 4096)
+		si := 0
+
+		var retFunc func() ([]V, error)
+		retFunc = func() ([]V, error) {
+			// validate the current segment
+			if si == len(segments) {
+				return nil, lezhnev74.EmptyIterator
+			}
+
+			s := &segments[si]
+
+			// read the segment
+			_, err := i.file.Seek(s.Offset, io.SeekStart)
+			if err != nil {
+				return nil, fmt.Errorf("read values segment failed: %w", err)
+			}
+
+			if si == len(segments)-1 {
+				segmentLen = i.indexOffset - s.Offset // the last segment
+			} else {
+				segmentLen = segments[si+1].Offset - s.Offset
+			}
+
+			if int64(cap(segmentBuf)) < segmentLen {
+				segmentBuf = make([]byte, segmentLen)
+			} else {
+				segmentBuf = segmentBuf[:segmentLen]
+			}
+
+			_, err = i.file.Read(segmentBuf)
+			if err != nil {
+				return nil, fmt.Errorf("read values segment failed: %w", err)
+			}
+
+			values, err := i.unserializeSegment(segmentBuf)
+			if err != nil {
+				return nil, fmt.Errorf("values: decompress fail: %w", err)
+			}
+
+			// filter out segment values based on the bitmap
+			segmentBitmap := roaring.New()
+			segmentBitmap.AddRange(uint64(si)*uint64(i.segmentSize), uint64(si+1)*uint64(i.segmentSize))
+			segmentBitmap.Intersects(b)
+
+			sit := segmentBitmap.Iterator()
+			k := 0
+			for sit.HasNext() {
+				vi := sit.Next()
+				values[k] = values[vi]
+				k++
+			}
+			values = values[:k]
+
+			// finally filter out values in place with respect to the min/max scope
+			k = 0
+			for _, v := range values {
+				if v < minVal || v > maxVal {
+					continue
+				}
+				values[k] = v
+				k++
+			}
+			values = values[:k]
+
+			si++
+
+			if len(values) == 0 {
+				// filtering revealed that this segment has no matching values,
+				// continue to the next segment:
+				return retFunc()
+			}
+
+			return values, nil
+		}
+
+		return retFunc
+	}
+
+	return makeFetchFunc(), nil
 }
 
 func NewInvertedIndexUnit[V constraints.Ordered](
