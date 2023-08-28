@@ -11,8 +11,12 @@ import (
 
 // Segments index
 type segmentIndexEntry[V constraints.Ordered] struct {
-	Offset int64 // uint64?
+	Offset int64
 	Min    V
+	// non-exportable, only used in the reading to remember segment's starting index number
+	// which is the number of the first value in the segment regarding to all values in the index
+	// thus if only few segments are selected for reading, we know how to map them to a bitmap
+	startNum int
 }
 
 func compressUint32(items []uint32) ([]byte, error) {

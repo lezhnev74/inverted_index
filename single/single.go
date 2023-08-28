@@ -149,7 +149,7 @@ func (i *InvertedIndex[V]) ReadValues(terms []string, minVal V, maxVal V) (lezhn
 
 	b := bs[0]
 	for j := 1; j < len(bs); j++ {
-		b.And(bs[j])
+		b.Or(bs[j])
 	}
 
 	segmentsIndex, err := i.readValuesIndex()
@@ -427,7 +427,7 @@ func (i *InvertedIndex[V]) getAllTermValues() []V {
 		totalNum += len(tv)
 	}
 
-	allValues := make([]V, totalNum/2) // to avoid many allocations, start with 50% of total
+	allValues := make([]V, 0, totalNum/2) // to avoid many allocations, start with 50% of total
 	for _, tv := range i.termsValues {
 		for _, v := range tv {
 			if slices.Contains(allValues, v) {
@@ -509,6 +509,7 @@ func (i *InvertedIndex[V]) writeAllValues(values []V) (valuesIndexOffset int64, 
 }
 
 func (i *InvertedIndex[V]) writeTermsBitmapsAndUpdateFST(bitmaps []*roaring.Bitmap) error {
+
 	// use our existing fst to iterate through terms in the same order as they were ingested
 	fst, err := vellum.Load(i.fstBuf.Bytes())
 	if err != nil {
@@ -666,6 +667,7 @@ func (i *InvertedIndex[V]) readBitmaps(terms []string) ([]*roaring.Bitmap, error
 
 		b := roaring.New()
 		_, err = b.ReadFrom(i.file)
+
 		if err != nil {
 			return nil, fmt.Errorf("parse bitmap: %w", err)
 		}
@@ -676,16 +678,30 @@ func (i *InvertedIndex[V]) readBitmaps(terms []string) ([]*roaring.Bitmap, error
 }
 
 func (i *InvertedIndex[V]) readValuesIndex() (index []segmentIndexEntry[V], err error) {
-	buf := make([]byte, 0)
+	buf := make([]byte, 4096)
 
 	_, err = i.file.Seek(i.indexOffset, io.SeekStart)
 	if err != nil {
 		return nil, fmt.Errorf("seek: %w", err)
 	}
 
-	_, err = i.file.Read(i.buf8)
+	_, err = i.file.Read(buf)
 	if err != nil {
 		return nil, fmt.Errorf("reading index len: %w", err)
+	}
+
+	indexLen := int64(binary.BigEndian.Uint64(buf[:8]))
+	if int64(cap(buf)) >= (indexLen + 8) {
+		// buf contains the index completely
+		buf = buf[8 : indexLen+8]
+	} else {
+		// read index required
+		buf = make([]byte, indexLen+8)
+		_, err = i.file.Read(buf)
+		if err != nil {
+			return nil, fmt.Errorf("reading index len: %w", err)
+		}
+		buf = buf[8 : indexLen+8]
 	}
 
 	index, err = decodeSegmentsIndex(buf, i.unserializeSegment)
@@ -706,7 +722,9 @@ func (i *InvertedIndex[V]) selectSegments(index []segmentIndexEntry[V], b *roari
 		if !b.IntersectsWithInterval(uint64(j*int(i.segmentSize)), uint64((j+1)*int(i.segmentSize))) {
 			continue
 		}
+		index[j].startNum = j * int(i.segmentSize)
 		index[k] = index[j]
+		k++
 	}
 	index = index[:k]
 
@@ -723,6 +741,7 @@ func (i *InvertedIndex[V]) selectSegments(index []segmentIndexEntry[V], b *roari
 			continue
 		}
 		index[k] = index[j]
+		k++
 	}
 	index = index[:k]
 
@@ -782,14 +801,16 @@ func (i *InvertedIndex[V]) makeSegmentsFetchFunc(
 
 			// filter out segment values based on the bitmap
 			segmentBitmap := roaring.New()
-			segmentBitmap.AddRange(uint64(si)*uint64(i.segmentSize), uint64(si+1)*uint64(i.segmentSize))
-			segmentBitmap.Intersects(b)
+			segmentBitmap.AddRange(uint64(s.startNum), uint64(s.startNum)+uint64(i.segmentSize))
+			segmentBitmap.And(b)
+			b.String()
+			segmentBitmap.String()
 
 			sit := segmentBitmap.Iterator()
 			k := 0
 			for sit.HasNext() {
 				vi := sit.Next()
-				values[k] = values[vi]
+				values[k] = values[vi-uint32(s.startNum)]
 				k++
 			}
 			values = values[:k]

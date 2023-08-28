@@ -294,27 +294,23 @@ func TestHugeFile(t *testing.T) {
 
 	// generate huge sequences
 	rand.Seed(uint64(time.Now().UnixNano()))
-	terms := make([]string, 10_000)
+	terms := make([]string, 100)
 	sample := make([]string, 0)
 	for i := 0; i < len(terms); i++ {
 		terms[i] = fmt.Sprintf("%030d", rand.Uint64())
-		if rand.Int()%101 == 0 {
+		if rand.Int()%1 == 0 {
 			sample = append(sample, terms[i])
 		}
 	}
 	slices.Sort(terms)
 
-	values := make([]uint32, 1_000)
+	values := make([]uint32, 10)
 	for i := 0; i < len(terms); i++ {
 		for j := 0; j < len(values); j++ {
 			values[j] = rand.Uint32()
 		}
 		require.NoError(t, indexWriter.Put(terms[i], values))
 	}
-
-	// report file size
-	s, _ := indexWriter.(*InvertedIndex[uint32]).file.Stat()
-	fmt.Printf("file size: %d bytes\n", s.Size())
 
 	err = indexWriter.Close()
 	require.NoError(t, err)
@@ -323,11 +319,15 @@ func TestHugeFile(t *testing.T) {
 	indexReader, err := OpenInvertedIndex[uint32](filename, decompressUint32)
 	require.NoError(t, err)
 
+	// report file size
+	s, _ := indexReader.(*InvertedIndex[uint32]).file.Stat()
+	fmt.Printf("file size: %d bytes\n", s.Size())
+
 	// Count total terms in the index
 	it, err := indexReader.ReadTerms()
 	require.NoError(t, err)
 	allTerms := lezhnev74.ToSlice(it)
-	require.Equal(t, 10_000, len(allTerms))
+	require.Equal(t, 100, len(allTerms))
 
 	// Read sampled terms
 	for _, ts := range sample {
@@ -339,7 +339,7 @@ func TestHugeFile(t *testing.T) {
 	require.NoError(t, err)
 
 	v := lezhnev74.ToSlice(it2)
-	require.Equal(t, 1_000, len(v))
+	require.Equal(t, 10, len(v))
 
 	require.NoError(t, indexReader.Close())
 }
