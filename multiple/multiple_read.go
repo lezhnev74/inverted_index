@@ -4,7 +4,9 @@ import (
 	"fmt"
 	lezhnev74 "github.com/lezhnev74/go-iterators"
 	"golang.org/x/exp/constraints"
+	"golang.org/x/exp/slices"
 	"inverted-index/single"
+	"os"
 )
 
 func NewMultipleTermsReader(files []string) (lezhnev74.Iterator[string], error) {
@@ -48,4 +50,44 @@ func NewMultipleValuesReader[T constraints.Ordered](
 	}
 
 	return tree, nil
+}
+
+// SelectFilesForMerging selects a subset of all given files that should be merged together (if any)
+func SelectFilesForMerging(files []string, minCount, maxCount int) ([]string, error) {
+
+	if len(files) < minCount {
+		return nil, nil
+	}
+
+	// sort files by size
+	type fsize struct {
+		f    string
+		size int64
+	}
+	sizes := make([]fsize, 0, len(files))
+
+	for _, f := range files {
+		fstat, err := os.Stat(f)
+		if err != nil {
+			return nil, fmt.Errorf("file %s size read failed: %w", f, err)
+		}
+		sizes = append(sizes, fsize{f, fstat.Size()})
+	}
+	slices.SortFunc(sizes, func(a, b fsize) int {
+		if a.size == b.size {
+			return 0
+		} else if a.size < b.size {
+			return -1
+		} else {
+			return 1
+		}
+	})
+
+	// pick some
+	selectedFiles := make([]string, 0, maxCount)
+	for _, fs := range sizes[:min(len(sizes), maxCount)] {
+		selectedFiles = append(selectedFiles, fs.f)
+	}
+
+	return selectedFiles, nil
 }

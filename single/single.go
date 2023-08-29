@@ -26,7 +26,7 @@ import (
                              \          _______________________/
                               \        /
             ┌──────┬───────┬───┬──────┐
-            │values│bitmaps│FST│Footer│
+            │Values│Bitmaps│FST│Footer│
             └──────┴───────┴───┴──────┘
           /         \__________________________
          |                                     \
@@ -67,6 +67,7 @@ type InvertedIndex[V cmp.Ordered] struct {
 	cmp                func(a, b V) int // -1,0,1 to impose order on values
 
 	// Writer-mode -----------------------------------------------------
+	// Accumulates data and writes our on Close()
 	fstBuilder   *vellum.Builder
 	bytesWritten uint32
 	// lastTerm is used to prevent term duplicates, ingested terms must be sorted and unique
@@ -79,6 +80,7 @@ type InvertedIndex[V cmp.Ordered] struct {
 	termsValues [][]V // temporary values for each term
 
 	// Reader-mode -----------------------------------------------------
+	// Reads immutable data in the file
 	// fst allows to compress terms in the index file
 	fst                    *vellum.FST
 	fstBuf                 *bytes.Buffer

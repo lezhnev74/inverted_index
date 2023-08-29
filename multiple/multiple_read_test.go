@@ -1,6 +1,7 @@
 package multiple
 
 import (
+	"fmt"
 	lezhnev74 "github.com/lezhnev74/go-iterators"
 	"github.com/stretchr/testify/require"
 	"inverted-index/single"
@@ -8,6 +9,26 @@ import (
 	"path/filepath"
 	"testing"
 )
+
+func TestSelectingForMerge(t *testing.T) {
+	dirPath, err := os.MkdirTemp("", "")
+	require.NoError(t, err)
+	defer os.RemoveAll(dirPath)
+
+	// since the func uses only filesizes, we can create N files manually
+	files := make([]string, 0)
+	for i := 0; i < 15; i++ {
+		filePath := filepath.Join(dirPath, fmt.Sprintf("file%d", i))
+		files = append(files, filePath)
+		err = os.WriteFile(filePath, make([]byte, i), 0666)
+		require.NoError(t, err)
+	}
+
+	selectedFiles, err := SelectFilesForMerging(files, 2, 4)
+	require.NoError(t, err)
+	expected := files[:4]
+	require.EqualValues(t, expected, selectedFiles)
+}
 
 func TestMultipleRead(t *testing.T) {
 	dirPath, err := os.MkdirTemp("", "")
