@@ -20,20 +20,19 @@ import (
 
 		File Layout:
 
-                            ┌──────┬──────────┬─────────────────┐
-                            │FSTLen│SegmentLen│ValuesIndexOffset│
-                            └──────┴──────────┴─────────────────┘
-                             \          _______________________/
+                            ┌─────*──────┬──8───┬───────4───────┬────4─────┬────────8────────┐
+                            │MinMaxValues│FSTLen│MinMaxValuesLen│SegmentLen│ValuesIndexOffset│
+                            └────────────┴──────┴───────────────┴──────────┴─────────────────┘
+                             \          ____________________________________________________/
                               \        /
-            ┌──────┬───────┬───┬──────┐
+            ┌──*───┬───*───┬─*─┬──*───┐
             │Values│Bitmaps│FST│Footer│
             └──────┴───────┴───┴──────┘
           /         \__________________________
          |                                     \
-         ┌────────┬─────┬────────┬────────┬─────┐
+         ┌───*────┬─────┬───*────┬───8────┬──*──┐
          │Segment1│ ... │SegmentN│IndexLen│Index│
          └────────┴─────┴────────┴────────┴─────┘
-
 
 */
 
@@ -46,10 +45,11 @@ var (
 // resembles a sorted map[string][]int
 // NOT CONCURRENT
 type InvertedIndex[V cmp.Ordered] struct {
-	file       *os.File
-	closeFile  sync.Once
-	filePos    int64
-	buf4, buf8 []byte // len buf
+	file           *os.File
+	closeFile      sync.Once
+	filePos        int64
+	buf4, buf8     []byte // len buf
+	minVal, maxVal V
 	/*
 		segmentSize specifies the number of values in a segment.
 		The smaller the segment the less read we hopefully do,
@@ -205,82 +205,6 @@ func (i *InvertedIndex[V]) ReadTerms() (lezhnev74.Iterator[string], error) {
 		})
 
 	return itWrap, nil
-}
-
-func (i *InvertedIndex[V]) readFooter() (
-	fst *vellum.FST,
-	segmentSize int64,
-	indexOffset int64,
-	fstOffset int64,
-	err error,
-) {
-
-	buf := make([]byte, 4096)
-	fstLenSize := int64(8)
-	segSize := int64(4)
-	indexOffsetSize := int64(8)
-	totalSizes := fstLenSize + segSize + indexOffsetSize
-
-	var (
-		fstLen int64
-	)
-
-	// read the end of the file for parsing footer
-	fstat, err := i.file.Stat()
-	if err != nil {
-		return
-	}
-	fileSize := fstat.Size()
-
-	if fstat.Size() <= fstLenSize+segSize+indexOffsetSize {
-		err = fmt.Errorf("the file size is too small (%d bytes), probably corrupted", fstat.Size())
-		return
-	}
-
-	p := min(fstat.Size(), int64(len(buf)))
-	_, err = i.file.Seek(-p, io.SeekEnd)
-	if err != nil {
-		err = fmt.Errorf("fst: %w", err)
-		return
-	}
-
-	n, err := i.file.Read(buf)
-	if err != nil && !errors.Is(err, io.EOF) {
-		err = fmt.Errorf("read footer length: %w", err)
-		return
-	}
-
-	// extract footer ints
-	indexOffset = int64(binary.BigEndian.Uint64(buf[int64(n)-indexOffsetSize:]))
-
-	segmentSize = int64(binary.BigEndian.Uint32(buf[int64(n)-indexOffsetSize-segSize : int64(n)-indexOffsetSize]))
-
-	fstLen = int64(binary.BigEndian.Uint64(buf[int64(n)-indexOffsetSize-segSize-fstLenSize : int64(n)-indexOffsetSize-segSize]))
-	fstOffset = fileSize - fstLen - fstLenSize - segSize - indexOffsetSize
-
-	// read fst body
-	if fstLen > int64(n)-fstLenSize-totalSizes { // do we need to read more bytes?
-		_, err = i.file.Seek(-(fstLen + totalSizes), io.SeekEnd)
-		if err != nil {
-			return
-		}
-
-		buf = make([]byte, fstLen)
-		_, err = i.file.Read(buf)
-		if err != nil {
-			return
-		}
-	} else {
-		buf = buf[n-int(fstLen+totalSizes) : int64(n)-totalSizes]
-	}
-
-	fst, err = vellum.Load(buf) // todo: use file for mmap io
-	if err != nil {
-		err = fmt.Errorf("fst: load failed: %w", err)
-		return
-	}
-
-	return
 }
 
 func (i *InvertedIndex[V]) makeTermValuesFetchFunc(
@@ -560,6 +484,45 @@ func (i *InvertedIndex[V]) writeTermsBitmapsAndUpdateFST(bitmaps []*roaring.Bitm
 	return nil
 }
 
+func (i *InvertedIndex[V]) writeFooter(valuesIndexOffset int64, fstL int) error {
+
+	values := []V{i.minVal, i.maxVal}
+	vBuf, err := i.serializeSegment(values)
+	if err != nil {
+		return fmt.Errorf("footer: failed compressing min/max values: %w", err)
+	}
+
+	_, err = i.file.Write(vBuf)
+	if err != nil {
+		return fmt.Errorf("footer: failed writing min/max values: %w", err)
+	}
+
+	binary.BigEndian.PutUint64(i.buf8, uint64(fstL))
+	_, err = i.file.Write(i.buf8)
+	if err != nil {
+		return fmt.Errorf("fst: failed writing size: %w", err)
+	}
+
+	binary.BigEndian.PutUint32(i.buf4, uint32(len(vBuf)))
+	_, err = i.file.Write(i.buf4)
+	if err != nil {
+		return fmt.Errorf("footer: failed writing min/max values size: %w", err)
+	}
+
+	binary.BigEndian.PutUint32(i.buf4, i.segmentSize)
+	_, err = i.file.Write(i.buf4)
+	if err != nil {
+		return fmt.Errorf("footer: failed writing segment size: %w", err)
+	}
+
+	binary.BigEndian.PutUint64(i.buf8, uint64(valuesIndexOffset))
+	_, err = i.file.Write(i.buf8)
+	if err != nil {
+		return fmt.Errorf("footer: failed writing index offset: %w", err)
+	}
+	return nil
+}
+
 // write flushes all in-memory data to the file
 func (i *InvertedIndex[V]) write() error {
 
@@ -569,6 +532,16 @@ func (i *InvertedIndex[V]) write() error {
 	}
 
 	allValues := i.getAllTermValues()
+
+	if len(allValues) == 0 {
+		var empty V
+		i.minVal = empty
+		i.maxVal = empty
+	} else {
+		i.minVal = allValues[0]
+		i.maxVal = allValues[len(allValues)-1]
+	}
+
 	termBitmaps := i.mapTermValuesToBitmaps(allValues)
 	i.termsValues = nil // free up
 
@@ -588,28 +561,118 @@ func (i *InvertedIndex[V]) write() error {
 	if err != nil {
 		return fmt.Errorf("fst: failed writing: %w", err)
 	}
-
-	binary.BigEndian.PutUint64(i.buf8, uint64(fstL))
-	_, err = i.file.Write(i.buf8)
-	if err != nil {
-		return fmt.Errorf("fst: failed writing size: %w", err)
-	}
 	i.fstBuf = nil // free up
+	i.filePos += int64(fstL)
 
 	// write the footer
-	binary.BigEndian.PutUint32(i.buf4, i.segmentSize)
-	_, err = i.file.Write(i.buf4)
+	return i.writeFooter(valuesIndexOffset, fstL)
+}
+
+func (i *InvertedIndex[V]) readFooter() (
+	fst *vellum.FST,
+	segmentSize int64,
+	indexOffset int64,
+	fstOffset int64,
+	minValue V,
+	maxValue V,
+	err error,
+) {
+
+	buf := make([]byte, 4096)
+	fstLenSize := int64(8)
+	minMaxSize := int64(4)
+	segSize := int64(4)
+	indexOffsetSize := int64(8)
+	totalSizes := fstLenSize + minMaxSize + segSize + indexOffsetSize
+
+	var (
+		fstLen int64
+		mmBuf  []byte
+	)
+
+	// read the end of the file for parsing footer
+	fstat, err := i.file.Stat()
 	if err != nil {
-		return fmt.Errorf("failed writing segment size: %w", err)
+		return
+	}
+	fileSize := fstat.Size()
+
+	if fstat.Size() <= totalSizes {
+		// This is a naive protection, works for empty files, does not cover all corruptions.
+		// For proper file consistency it should check a hashsum.
+		err = fmt.Errorf("the file size is too small (%d bytes), probably corrupted", fstat.Size())
+		return
 	}
 
-	binary.BigEndian.PutUint64(i.buf8, uint64(valuesIndexOffset))
-	_, err = i.file.Write(i.buf8)
+	p := min(fstat.Size(), int64(len(buf)))
+	_, err = i.file.Seek(-p, io.SeekEnd)
 	if err != nil {
-		return fmt.Errorf("failed writing index offset: %w", err)
+		err = fmt.Errorf("fst: %w", err)
+		return
 	}
 
-	return nil
+	n, err := i.file.Read(buf)
+	if err != nil && !errors.Is(err, io.EOF) {
+		err = fmt.Errorf("read footer length: %w", err)
+		return
+	}
+
+	// extract footer numbers
+	indexOffset = int64(binary.BigEndian.Uint64(buf[int64(n)-indexOffsetSize:]))
+
+	segmentSize = int64(binary.BigEndian.Uint32(buf[int64(n)-indexOffsetSize-segSize : int64(n)-indexOffsetSize]))
+
+	minMaxLen := int64(binary.BigEndian.Uint32(buf[int64(n)-indexOffsetSize-segSize-minMaxSize : int64(n)-indexOffsetSize-segSize]))
+
+	fstLen = int64(binary.BigEndian.Uint64(buf[int64(n)-indexOffsetSize-segSize-minMaxSize-fstLenSize : int64(n)-indexOffsetSize-segSize-minMaxSize]))
+
+	fstOffset = fileSize - fstLen - fstLenSize - segSize - indexOffsetSize - minMaxSize - minMaxLen
+
+	// read fst body
+	if fstLen > int64(n)-minMaxLen-totalSizes { // do we need to read more bytes?
+		_, err = i.file.Seek(-(fstLen + minMaxLen + totalSizes), io.SeekEnd)
+		if err != nil {
+			return
+		}
+
+		buf = make([]byte, fstLen)
+		_, err = i.file.Read(buf)
+		if err != nil {
+			return
+		}
+	} else {
+		// if FST is in the buf already, that means minMax values are there too
+		mmBuf = buf[n-int(minMaxLen+totalSizes) : int64(n)-totalSizes]
+		buf = buf[n-int(fstLen+minMaxLen+totalSizes) : int64(n)-totalSizes-minMaxLen]
+	}
+
+	fst, err = vellum.Load(buf)
+	if err != nil {
+		err = fmt.Errorf("fst: load failed: %w", err)
+		return
+	}
+
+	// read min-max values
+	if minMaxLen > int64(len(mmBuf)) { // do we need to read more bytes?
+		_, err = i.file.Seek(-(minMaxLen + totalSizes), io.SeekEnd)
+		if err != nil {
+			return
+		}
+
+		mmBuf = make([]byte, minMaxLen)
+		_, err = i.file.Read(mmBuf)
+		if err != nil {
+			return
+		}
+	}
+
+	values, err := i.unserializeSegment(mmBuf)
+	if err != nil {
+		return
+	}
+	minValue, maxValue = values[0], values[1]
+
+	return
 }
 
 func (i *InvertedIndex[V]) readBitmaps(terms []string) ([]*roaring.Bitmap, error) {
@@ -897,7 +960,7 @@ func OpenInvertedIndex[V constraints.Ordered](
 		cmp:                lezhnev74.OrderedCmpFunc[V],
 	}
 
-	fst, segmSize, indexOffset, fstOffset, err := i.readFooter()
+	fst, segmSize, indexOffset, fstOffset, minValue, maxValue, err := i.readFooter()
 	if err != nil {
 		return nil, err
 	}
@@ -906,6 +969,8 @@ func OpenInvertedIndex[V constraints.Ordered](
 	i.segmentSize = uint32(segmSize)
 	i.fstOffset = fstOffset
 	i.indexOffset = indexOffset
+	i.minVal = minValue
+	i.maxVal = maxValue
 
 	return i, nil
 }

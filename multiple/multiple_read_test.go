@@ -10,12 +10,71 @@ import (
 	"testing"
 )
 
+//
+//func TestMerging(t *testing.T) {
+//	dirPath, err := os.MkdirTemp("", "")
+//	require.NoError(t, err)
+//	defer os.RemoveAll(dirPath)
+//
+//	// 1. Populate files
+//	type indexTermData struct {
+//		term   string
+//		values []uint32
+//	}
+//	existingIndexes := [][]indexTermData{
+//		{
+//			indexTermData{"term10", []uint32{1, 6, 7}},
+//			indexTermData{"term11", []uint32{10}},
+//			indexTermData{"term12", []uint32{}},
+//		},
+//		{
+//			indexTermData{"term1", []uint32{15, 20}},
+//			indexTermData{"term4", []uint32{21, 22, 23, 24, 25}},
+//		},
+//		{
+//			indexTermData{"term0", []uint32{500, 1, 99}},
+//			indexTermData{"term15", []uint32{9, 10, 11}},
+//		},
+//	}
+//
+//	files := make([]string, 0)
+//	for i, e := range existingIndexes {
+//		filePath := filepath.Join(dirPath, fmt.Sprintf("file%d", i))
+//		files = append(files, filePath)
+//
+//		w, err := single.NewInvertedIndexUnit(filePath, 2, single.CompressUint32, single.DecompressUint32)
+//		require.NoError(t, err)
+//
+//		for _, id := range e {
+//			require.NoError(t, w.Put(id.term, id.values))
+//		}
+//		require.NoError(t, w.Close())
+//	}
+//
+//	// 2. Merge to a new index
+//	newFilePath := filepath.Join(dirPath, "newFile")
+//	err = MergeIndexes(files, newFilePath)
+//	require.NoError(t, err)
+//
+//	// 3. Check the new index
+//	r, err := single.OpenInvertedIndex(newFilePath, single.DecompressUint32)
+//	require.NoError(t, err)
+//
+//	expectedTerms := []string{"term0", "term1", "term4", "term10", "term11", "term12", "term15"}
+//
+//	tit, err := r.ReadTerms()
+//	require.NoError(t, err)
+//	actualTerms := lezhnev74.ToSlice(tit)
+//
+//	require.EqualValues(t, expectedTerms, actualTerms)
+//}
+
 func TestSelectingForMerge(t *testing.T) {
 	dirPath, err := os.MkdirTemp("", "")
 	require.NoError(t, err)
 	defer os.RemoveAll(dirPath)
 
-	// since the func uses only filesizes, we can create N files manually
+	// since the func uses only file sizes, we can create N files manually
 	files := make([]string, 0)
 	for i := 0; i < 15; i++ {
 		filePath := filepath.Join(dirPath, fmt.Sprintf("file%d", i))

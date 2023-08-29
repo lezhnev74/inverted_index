@@ -34,7 +34,7 @@ func TestAPI(t *testing.T) {
 			},
 			assert: func(r InvertedIndexReader[int]) {},
 		}, {
-			name:        "idempotent read",
+			name:        "idempotent terms read",
 			segmentSize: 1000,
 			prepare: func(w InvertedIndexWriter[int]) {
 				require.NoError(t, w.Put("term", []int{1}))
