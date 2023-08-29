@@ -709,6 +709,15 @@ func (i *InvertedIndex[V]) readValuesIndex() (index []segmentIndexEntry[V], err 
 		return nil, fmt.Errorf("decoding values index: %w", err)
 	}
 
+	// put each segment's len for further simpler reading as (offset + len)
+	for j, s := range index {
+		if j+1 == len(index) {
+			index[j].len = i.indexOffset - s.Offset
+		} else {
+			index[j].len = index[j+1].Offset - s.Offset
+		}
+	}
+
 	return
 }
 
@@ -758,7 +767,6 @@ func (i *InvertedIndex[V]) makeSegmentsFetchFunc(
 	// Returns a function that can be used in a slice fetching iterator,
 	// upon calling the func it will return slices of sorted values
 	makeFetchFunc := func() func() ([]V, error) {
-		var segmentLen int64
 		segmentBuf := make([]byte, 4096)
 		si := 0
 
@@ -777,16 +785,10 @@ func (i *InvertedIndex[V]) makeSegmentsFetchFunc(
 				return nil, fmt.Errorf("read values segment failed: %w", err)
 			}
 
-			if si == len(segments)-1 {
-				segmentLen = i.indexOffset - s.Offset // the last segment
+			if int64(cap(segmentBuf)) < s.len {
+				segmentBuf = make([]byte, s.len)
 			} else {
-				segmentLen = segments[si+1].Offset - s.Offset
-			}
-
-			if int64(cap(segmentBuf)) < segmentLen {
-				segmentBuf = make([]byte, segmentLen)
-			} else {
-				segmentBuf = segmentBuf[:segmentLen]
+				segmentBuf = segmentBuf[:s.len]
 			}
 
 			_, err = i.file.Read(segmentBuf)

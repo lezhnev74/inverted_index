@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/gob"
 	"fmt"
+	"github.com/golang/snappy"
 	"github.com/ronanh/intcomp"
 	"golang.org/x/exp/constraints"
 )
@@ -13,10 +14,25 @@ import (
 type segmentIndexEntry[V constraints.Ordered] struct {
 	Offset int64
 	Min    V
-	// non-exportable, only used in the reading to remember segment's starting index number
-	// which is the number of the first value in the segment regarding to all values in the index
-	// thus if only few segments are selected for reading, we know how to map them to a bitmap
+	/*
+		startNum is non-exportable, only used in the reading to remember segment's starting index number
+		which is the number of the first value in the segment regarding all values in the index
+		thus if only few segments are selected for reading, we know how to compare them with a bitmap
+	*/
 	startNum int
+	/*
+		len is used to find the segment file area during reading
+	*/
+	len int64
+}
+
+func compressBytes(src []byte) ([]byte, error) {
+	encoded := snappy.Encode(nil, src)
+	return encoded, nil
+}
+
+func decompressBytes(src []byte) ([]byte, error) {
+	return snappy.Decode(nil, src)
 }
 
 func compressUint32(items []uint32) ([]byte, error) {

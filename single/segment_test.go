@@ -1,6 +1,7 @@
 package single
 
 import (
+	"encoding/binary"
 	"fmt"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/exp/rand"
@@ -9,12 +10,41 @@ import (
 	"time"
 )
 
+func TestCompressBytes(t *testing.T) {
+	nums := []uint32{}
+
+	rand.Seed(uint64(time.Now().UnixNano()))
+	for i := 0; i < 1000; i++ {
+		nums = append(nums, rand.Uint32())
+	}
+	slices.Sort(nums)
+
+	bs := make([]byte, 0, len(nums)*4)
+	b := make([]byte, 4)
+	for _, n := range nums {
+		binary.BigEndian.PutUint32(b, n)
+		bs = append(bs, b...)
+	}
+
+	encoded, err := compressBytes(bs)
+	require.NoError(t, err)
+
+	fmt.Printf("nums count: %d\n", len(nums))
+	fmt.Printf("nums bytes: %d\n", len(bs))
+	fmt.Printf("compressed bytes: %d\n", len(encoded))
+
+	output, err := decompressBytes(encoded)
+	require.NoError(t, err)
+
+	require.EqualValues(t, bs, output)
+}
+
 func TestUint32CompressionRatioFuncs(t *testing.T) {
 	size := 1_000
 
 	input := make([]uint32, size)
 	for i := 0; i < len(input); i++ {
-		input[i] = uint32(time.Now().Add(time.Hour * time.Duration(rand.Uint32()%1000)).Unix())
+		input[i] = rand.Uint32()
 	}
 	slices.Sort(input) // for better compression sort values
 

@@ -177,6 +177,20 @@ func TestAPI(t *testing.T) {
 				timestamps := lezhnev74.ToSlice(valuesIterator)
 				require.EqualValues(t, []int{7, 8, 10}, timestamps)
 			},
+		}, {
+			name:        "read values for some terms",
+			segmentSize: 2,
+			prepare: func(w InvertedIndexWriter[int]) {
+				require.NoError(t, w.Put("term1", []int{1, 3, 7}))
+				require.NoError(t, w.Put("term2", []int{4, 6, 8, 10, 12}))
+				require.NoError(t, w.Put("term3", []int{0, 5, 11, 15}))
+			},
+			assert: func(r InvertedIndexReader[int]) {
+				valuesIterator, err := r.ReadValues([]string{"term2"}, 0, 999)
+				require.NoError(t, err)
+				timestamps := lezhnev74.ToSlice(valuesIterator)
+				require.EqualValues(t, []int{4, 6, 8, 10, 12}, timestamps)
+			},
 		},
 	}
 
@@ -199,6 +213,7 @@ func TestAPI(t *testing.T) {
 		})
 	}
 }
+
 func TestUseUint32Compression(t *testing.T) {
 	dirPath, err := os.MkdirTemp("", "")
 	require.NoError(t, err)
@@ -289,7 +304,7 @@ func TestHugeFile(t *testing.T) {
 	filename := filepath.Join(dirPath, "index")
 
 	// 1. Make a new index (open in writer mode), put values and close.
-	indexWriter, err := NewInvertedIndexUnit[uint32](filename, 100, compressUint32, decompressUint32)
+	indexWriter, err := NewInvertedIndexUnit[uint32](filename, 997, compressUint32, decompressUint32)
 	require.NoError(t, err)
 
 	// generate huge sequences
@@ -304,8 +319,8 @@ func TestHugeFile(t *testing.T) {
 	}
 	slices.Sort(terms)
 
-	values := make([]uint32, 10)
 	for i := 0; i < len(terms); i++ {
+		values := make([]uint32, 10)
 		for j := 0; j < len(values); j++ {
 			values[j] = rand.Uint32()
 		}
