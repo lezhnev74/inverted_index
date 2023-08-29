@@ -185,6 +185,9 @@ func (i *InvertedIndex[V]) ReadTerms() (lezhnev74.Iterator[string], error) {
 	itWrap := lezhnev74.NewCallbackIterator(
 		func() (v string, err error) {
 			if lastErr != nil {
+				if errors.Is(lastErr, vellum.ErrIteratorDone) {
+					lastErr = lezhnev74.EmptyIterator // override the internal error
+				}
 				return "", lastErr
 			}
 			term, _ := it.Current()
