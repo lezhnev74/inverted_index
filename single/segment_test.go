@@ -48,7 +48,7 @@ func TestUint32CompressionRatioFuncs(t *testing.T) {
 	}
 	slices.Sort(input) // for better compression sort values
 
-	encoded, err := compressUint32(input)
+	encoded, err := CompressUint32(input)
 	require.NoError(t, err)
 
 	uncompressedEstimatedSize := size * 4
@@ -59,10 +59,10 @@ func TestUint32CompressionRatioFuncs(t *testing.T) {
 
 func TestUint32CompressionFuncs(t *testing.T) {
 	input := []uint32{1}
-	encoded, err := compressUint32(input)
+	encoded, err := CompressUint32(input)
 	require.NoError(t, err)
 
-	output, err := decompressUint32(encoded)
+	output, err := DecompressUint32(encoded)
 	require.NoError(t, err)
 
 	require.EqualValues(t, input, output)
@@ -70,10 +70,10 @@ func TestUint32CompressionFuncs(t *testing.T) {
 
 func TestGobFuncs(t *testing.T) {
 	input := []uint32{1}
-	encoded, err := compressGob(input)
+	encoded, err := CompressGob(input)
 	require.NoError(t, err)
 
-	output, err := decompressGob[uint32](encoded)
+	output, err := DecompressGob[uint32](encoded)
 	require.NoError(t, err)
 
 	require.EqualValues(t, input, output)

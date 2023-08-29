@@ -35,7 +35,7 @@ func decompressBytes(src []byte) ([]byte, error) {
 	return snappy.Decode(nil, src)
 }
 
-func compressUint32(items []uint32) ([]byte, error) {
+func CompressUint32(items []uint32) ([]byte, error) {
 	b := make([]byte, 4)
 	encoded := intcomp.CompressUint32(items, nil)
 	out := make([]byte, 0, len(encoded)*4)
@@ -47,7 +47,7 @@ func compressUint32(items []uint32) ([]byte, error) {
 	return out, nil
 }
 
-func decompressUint32(data []byte) (items []uint32, err error) {
+func DecompressUint32(data []byte) (items []uint32, err error) {
 	valueInts := make([]uint32, 0)
 	for i := 0; i < len(data); i += 4 {
 		valueInts = append(valueInts, binary.BigEndian.Uint32(data[i:i+4]))
@@ -57,14 +57,14 @@ func decompressUint32(data []byte) (items []uint32, err error) {
 	return
 }
 
-func compressGob[T any](items []T) ([]byte, error) {
+func CompressGob[T any](items []T) ([]byte, error) {
 	w := new(bytes.Buffer)
 	enc := gob.NewEncoder(w)
 	err := enc.Encode(items)
 	return w.Bytes(), err
 }
 
-func decompressGob[T any](data []byte) (items []T, err error) {
+func DecompressGob[T any](data []byte) (items []T, err error) {
 	w := bytes.NewBuffer(data)
 	enc := gob.NewDecoder(w)
 	err = enc.Decode(&items)
