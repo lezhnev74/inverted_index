@@ -97,6 +97,7 @@ type InvertedIndexReader[V constraints.Ordered] interface {
 	ReadTerms() (lezhnev74.Iterator[string], error)
 	// ReadValues returns sorted iterator
 	ReadValues(terms []string, min V, max V) (lezhnev74.Iterator[V], error)
+	ReadAllValues(terms []string) (lezhnev74.Iterator[V], error)
 	io.Closer
 }
 
@@ -173,6 +174,10 @@ func (i *InvertedIndex[V]) ReadValues(terms []string, minVal V, maxVal V) (lezhn
 	it := lezhnev74.NewDynamicSliceIterator(valuesFetchFunc, closeIterator)
 
 	return it, nil
+}
+
+func (i *InvertedIndex[V]) ReadAllValues(terms []string) (lezhnev74.Iterator[V], error) {
+	return i.ReadValues(terms, i.minVal, i.maxVal)
 }
 
 func (i *InvertedIndex[V]) ReadTerms() (lezhnev74.Iterator[string], error) {
@@ -873,8 +878,6 @@ func (i *InvertedIndex[V]) makeSegmentsFetchFunc(
 			segmentBitmap := roaring.New()
 			segmentBitmap.AddRange(uint64(s.startNum), uint64(s.startNum)+uint64(i.segmentSize))
 			segmentBitmap.And(b)
-			b.String()
-			segmentBitmap.String()
 
 			sit := segmentBitmap.Iterator()
 			k := 0

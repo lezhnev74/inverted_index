@@ -1,6 +1,7 @@
 package multiple
 
 import (
+	"errors"
 	"fmt"
 	lezhnev74 "github.com/lezhnev74/go-iterators"
 	"golang.org/x/exp/constraints"
@@ -9,60 +10,66 @@ import (
 	"os"
 )
 
-//
-//func MergeIndexes[V constraints.Ordered](
-//	src []string,
-//	dst string,
-//	segmentSize uint32,
-//	serializeValues func([]V) ([]byte, error),
-//	unserializeValues func([]byte) ([]V, error),
-//) error {
-//
-//	var term string
-//	allTermsIterator := lezhnev74.NewSliceIterator([]string{})
-//	defer allTermsIterator.Close()
-//	srcIndexes := make([]single.InvertedIndexReader[V], 0, len(src))
-//
-//	for _, f := range src {
-//		r, err := single.OpenInvertedIndex(f, unserializeValues)
-//		if err != nil {
-//			return fmt.Errorf("open file %s: %w", f, err)
-//		}
-//		srcIndexes = append(srcIndexes, r)
-//
-//		it, err := r.ReadTerms()
-//		if err != nil {
-//			return fmt.Errorf("read terms %s: %w", f, err)
-//		}
-//
-//		allTermsIterator = lezhnev74.NewUniqueSelectingIterator[string](allTermsIterator, it, lezhnev74.OrderedCmpFunc[string])
-//	}
-//
-//	w, err := single.NewInvertedIndexUnit(dst, segmentSize, serializeValues, unserializeValues)
-//	if err != nil {
-//		return fmt.Errorf("create new index %s: %w", dst, err)
-//	}
-//
-//	for {
-//		term, err = allTermsIterator.Next()
-//		if err != nil {
-//			return fmt.Errorf("read merged terms: %w", err)
-//		}
-//
-//		// get all values for this term from all indexes
-//		tvIt := lezhnev74.NewSliceIterator([]string{})
-//		for _, r := range srcIndexes {
-//			vIt, err := r.ReadValues(term)
-//		}
-//
-//		err = w.Put(term, nil)
-//		if err != nil {
-//			return fmt.Errorf("put to new index: %w", err)
-//		}
-//	}
-//
-//	return w.Close()
-//}
+func MergeIndexes[V constraints.Ordered](
+	src []string,
+	dst string,
+	segmentSize uint32,
+	serializeValues func([]V) ([]byte, error),
+	unserializeValues func([]byte) ([]V, error),
+) error {
+
+	var term string
+	allTermsIterator := lezhnev74.NewSliceIterator([]string{})
+	defer allTermsIterator.Close()
+	srcIndexes := make([]single.InvertedIndexReader[V], 0, len(src))
+
+	for _, f := range src {
+		r, err := single.OpenInvertedIndex(f, unserializeValues)
+		if err != nil {
+			return fmt.Errorf("open file %s: %w", f, err)
+		}
+		srcIndexes = append(srcIndexes, r)
+
+		it, err := r.ReadTerms()
+		if err != nil {
+			return fmt.Errorf("read terms %s: %w", f, err)
+		}
+
+		allTermsIterator = lezhnev74.NewUniqueSelectingIterator[string](allTermsIterator, it, lezhnev74.OrderedCmpFunc[string])
+	}
+
+	w, err := single.NewInvertedIndexUnit(dst, segmentSize, serializeValues, unserializeValues)
+	if err != nil {
+		return fmt.Errorf("create new index %s: %w", dst, err)
+	}
+
+	for {
+		term, err = allTermsIterator.Next()
+		if errors.Is(err, lezhnev74.EmptyIterator) {
+			break
+		} else if err != nil {
+			return fmt.Errorf("read merged terms: %w", err)
+		}
+
+		// get all values for this term from all indexes
+		tvIt := lezhnev74.NewSliceIterator([]V{})
+		for _, r := range srcIndexes {
+			vIt, err := r.ReadAllValues([]string{term})
+			if err != nil {
+				return fmt.Errorf("read term values: %w", err)
+			}
+			tvIt = lezhnev74.NewUniqueSelectingIterator(tvIt, vIt, lezhnev74.OrderedCmpFunc[V])
+		}
+		allTermValues := lezhnev74.ToSlice(tvIt)
+
+		err = w.Put(term, allTermValues)
+		if err != nil {
+			return fmt.Errorf("put to new index: %w", err)
+		}
+	}
+
+	return w.Close()
+}
 
 func NewMultipleTermsReader(files []string) (lezhnev74.Iterator[string], error) {
 

@@ -103,6 +103,19 @@ func TestAPI(t *testing.T) {
 				require.Empty(t, terms)
 			},
 		}, {
+			name:        "read all values",
+			segmentSize: 1000,
+			prepare: func(w InvertedIndexWriter[int]) {
+				require.NoError(t, w.Put("term1", []int{10, 20}))
+				require.NoError(t, w.Put("term2", []int{1, 20, 30}))
+			},
+			assert: func(r InvertedIndexReader[int]) {
+				valuesIterator, err := r.ReadAllValues([]string{"term1", "term2"})
+				require.NoError(t, err)
+				timestamps := lezhnev74.ToSlice(valuesIterator)
+				require.EqualValues(t, []int{1, 10, 20, 30}, timestamps)
+			},
+		}, {
 			name:        "values from 2 terms",
 			segmentSize: 1000,
 			prepare: func(w InvertedIndexWriter[int]) {
