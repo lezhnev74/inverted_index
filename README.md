@@ -97,3 +97,27 @@ To preserve disk space the index format applies a few compressing techniques:
 
 These ideas come from the Lucene design. Compression here works only as good as the data that comes in. Highly random
 data will be less compressible (applies to both terms and postings).
+
+Here is the file format used for the index. Made with [asciiflow.com](https://asciiflow.com/).
+```
+		File Layout:
+
+                            ┌─────*──────┬──8───┬───────4───────┬────4─────┬────────8────────┐
+                            │MinMaxValues│FSTLen│MinMaxValuesLen│SegmentLen│ValuesIndexOffset│
+                            └────────────┴──────┴───────────────┴──────────┴─────────────────┘
+                             \          ____________________________________________________/
+                              \        /
+            ┌──*───┬───*───┬─*─┬──*───┐
+            │Values│Bitmaps│FST│Footer│
+            └──────┴───────┴───┴──────┘
+          /         \__________________________
+         |                                     \
+         ┌───*────┬─────┬───*────┬───8────┬──*──┐
+         │Segment1│ ... │SegmentN│IndexLen│Index│
+         └────────┴─────┴────────┴────────┴─────┘
+
+```
+
+## Contribute
+
+Open an issue and let's continue there.
