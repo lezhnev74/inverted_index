@@ -1,5 +1,7 @@
 # Inverted Index
 
+[![Go package](https://github.com/lezhnev74/inverted_index/actions/workflows/workflow.yml/badge.svg)](https://github.com/lezhnev74/inverted_index/actions/workflows/workflow.yml)
+
 This repository contains code to manage inverted indexes. It introduces a file format to store and read them
 efficiently.
 The inverted index is a map of string terms to "postings" which are some ordered values (usually doc ids or timestamps).
