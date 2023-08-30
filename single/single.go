@@ -8,7 +8,8 @@ import (
 	"fmt"
 	"github.com/RoaringBitmap/roaring"
 	"github.com/blevesearch/vellum"
-	"github.com/lezhnev74/go-iterators"
+	lezhnev74 "github.com/lezhnev74/go-iterators"
+
 	"golang.org/x/exp/constraints"
 	"golang.org/x/exp/slices"
 	"io"
