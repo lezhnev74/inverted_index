@@ -333,7 +333,7 @@ func TestHugeFile(t *testing.T) {
 	slices.Sort(terms)
 
 	for i := 0; i < len(terms); i++ {
-		values := make([]uint32, 10)
+		values := make([]uint32, 1000)
 		for j := 0; j < len(values); j++ {
 			values[j] = rand.Uint32()
 		}
@@ -344,12 +344,8 @@ func TestHugeFile(t *testing.T) {
 	require.NoError(t, err)
 
 	// 2. Open the index in a reader-mode
-	indexReader, err := OpenInvertedIndex[uint32](filename, DecompressUint32)
+	indexReader, err := OpenInvertedIndex(filename, DecompressUint32)
 	require.NoError(t, err)
-
-	// report file size
-	s, _ := indexReader.(*InvertedIndex[uint32]).file.Stat()
-	fmt.Printf("file size: %d bytes\n", s.Size())
 
 	// Count total terms in the index
 	it, err := indexReader.ReadTerms()
@@ -367,7 +363,10 @@ func TestHugeFile(t *testing.T) {
 	require.NoError(t, err)
 
 	v := lezhnev74.ToSlice(it2)
-	require.Equal(t, 10, len(v))
+	require.Equal(t, 1000, len(v))
 
 	require.NoError(t, indexReader.Close())
+
+	// show summary
+	PrintSummary(filename, os.Stdout)
 }

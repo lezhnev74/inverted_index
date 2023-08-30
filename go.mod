@@ -1,4 +1,4 @@
-module inverted-index
+module github.com/lezhnev74/inverted-index
 
 go 1.21.0
 

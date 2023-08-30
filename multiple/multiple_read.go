@@ -4,9 +4,10 @@ import (
 	"errors"
 	"fmt"
 	lezhnev74 "github.com/lezhnev74/go-iterators"
+	"github.com/lezhnev74/inverted-index/single"
 	"golang.org/x/exp/constraints"
 	"golang.org/x/exp/slices"
-	"inverted-index/single"
+
 	"os"
 )
 
