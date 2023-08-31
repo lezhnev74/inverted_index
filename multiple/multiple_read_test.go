@@ -3,7 +3,7 @@ package multiple
 import (
 	"fmt"
 	lezhnev74 "github.com/lezhnev74/go-iterators"
-	"github.com/lezhnev74/inverted-index/single"
+	"github.com/lezhnev74/inverted_index/single"
 	"github.com/stretchr/testify/require"
 
 	"os"

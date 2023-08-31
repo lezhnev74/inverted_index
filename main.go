@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"github.com/lezhnev74/inverted-index/single"
+	"github.com/lezhnev74/inverted_index/single"
 	"github.com/urfave/cli/v2"
 
 	"log"
