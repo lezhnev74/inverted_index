@@ -13,7 +13,7 @@ source log file. My [blog post](https://lessthan12ms.com/inverted-index.html) ex
 ## Installation And Usage
 
 ```
-go get github.com/lezhnev74/inverted-index
+go get github.com/lezhnev74/inverted_index
 ```
 
 ### Working With Single Index File
