@@ -103,6 +103,19 @@ func TestAPI(t *testing.T) {
 				require.Empty(t, terms)
 			},
 		}, {
+			name:        "read values for partially missing terms",
+			segmentSize: 1000,
+			prepare: func(w InvertedIndexWriter[int]) {
+				require.NoError(t, w.Put("term1", []int{1}))
+				require.NoError(t, w.Put("term2", []int{2}))
+			},
+			assert: func(r InvertedIndexReader[int]) {
+				it, err := r.ReadValues([]string{"term2", "term3"}, 0, 100)
+				require.NoError(t, err)
+				vals := lezhnev74.ToSlice(it)
+				require.EqualValues(t, []int{2}, vals)
+			},
+		}, {
 			name:        "read all values",
 			segmentSize: 1000,
 			prepare: func(w InvertedIndexWriter[int]) {
@@ -225,6 +238,26 @@ func TestAPI(t *testing.T) {
 			tt.assert(indexReader)
 		})
 	}
+}
+
+func TestFileSizeReported(t *testing.T) {
+	// after the index is closed it remembers the written size, so we can avoid further fstat calls.
+
+	dirPath, err := os.MkdirTemp("", "")
+	require.NoError(t, err)
+	defer os.RemoveAll(dirPath)
+	filename := filepath.Join(dirPath, "index")
+
+	// Make a new index
+	indexWriter, err := NewInvertedIndexUnit[int](filename, 1, CompressGob[int], DecompressGob[int])
+	require.NoError(t, err)
+	require.NoError(t, indexWriter.Put("term1", []int{10, 20})) // <-- two segments will be written (len=1)
+	err = indexWriter.Close()
+	require.NoError(t, err)
+
+	// Real size
+	fstat, _ := os.Stat(filename)
+	require.Equal(t, fstat.Size(), indexWriter.Len())
 }
 
 func TestUseUint32Compression(t *testing.T) {

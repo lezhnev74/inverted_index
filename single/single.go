@@ -92,6 +92,8 @@ type InvertedIndexWriter[V constraints.Ordered] interface {
 	io.Closer // flush FST
 	// Put must be called so terms are sorted, values must also be sorted beforehand
 	Put(term string, values []V) error
+	// Len returns bytes written to the files
+	Len() int64
 }
 
 type InvertedIndexReader[V constraints.Ordered] interface {
@@ -114,6 +116,8 @@ func (i *InvertedIndex[V]) Close() error {
 
 	return nil
 }
+
+func (i *InvertedIndex[V]) Len() int64 { return i.filePos }
 
 // Put remembers all terms and its values, actual writing is delayed until Close()
 func (i *InvertedIndex[V]) Put(term string, values []V) error {
@@ -498,34 +502,40 @@ func (i *InvertedIndex[V]) writeFooter(valuesIndexOffset int64, fstL int) error 
 		return fmt.Errorf("footer: failed compressing min/max values: %w", err)
 	}
 
-	_, err = i.file.Write(vBuf)
+	n, err := i.file.Write(vBuf)
 	if err != nil {
 		return fmt.Errorf("footer: failed writing min/max values: %w", err)
 	}
+	i.filePos += int64(n)
 
 	binary.BigEndian.PutUint64(i.buf8, uint64(fstL))
-	_, err = i.file.Write(i.buf8)
+	n, err = i.file.Write(i.buf8)
 	if err != nil {
 		return fmt.Errorf("fst: failed writing size: %w", err)
 	}
+	i.filePos += int64(n)
 
 	binary.BigEndian.PutUint32(i.buf4, uint32(len(vBuf)))
-	_, err = i.file.Write(i.buf4)
+	n, err = i.file.Write(i.buf4)
 	if err != nil {
 		return fmt.Errorf("footer: failed writing min/max values size: %w", err)
 	}
+	i.filePos += int64(n)
 
 	binary.BigEndian.PutUint32(i.buf4, i.segmentSize)
-	_, err = i.file.Write(i.buf4)
+	n, err = i.file.Write(i.buf4)
 	if err != nil {
 		return fmt.Errorf("footer: failed writing segment size: %w", err)
 	}
+	i.filePos += int64(n)
 
 	binary.BigEndian.PutUint64(i.buf8, uint64(valuesIndexOffset))
-	_, err = i.file.Write(i.buf8)
+	n, err = i.file.Write(i.buf8)
 	if err != nil {
 		return fmt.Errorf("footer: failed writing index offset: %w", err)
 	}
+	i.filePos += int64(n)
+
 	return nil
 }
 
@@ -682,7 +692,9 @@ func (i *InvertedIndex[V]) readFooter() (
 }
 
 func (i *InvertedIndex[V]) readBitmaps(terms []string) ([]*roaring.Bitmap, error) {
+
 	slices.Sort(terms)
+
 	fstIt, err := i.fst.Iterator([]byte(terms[0]), nil)
 	if err != nil && !errors.Is(err, vellum.ErrIteratorDone) {
 		return nil, fmt.Errorf("read fst: %w", err)
@@ -698,15 +710,17 @@ func (i *InvertedIndex[V]) readBitmaps(terms []string) ([]*roaring.Bitmap, error
 
 	bitmaps := make([]*roaring.Bitmap, 0, len(terms))
 	buf := make([]byte, 4096)
-	//bbuf := bytes.NewBuffer(buf)
 
 	for _, term := range terms {
 
 		// figure out term's bitmap file region
 		err = fstIt.Seek([]byte(term))
-		if err != nil {
+		if err != nil && !errors.Is(err, vellum.ErrIteratorDone) {
 			return nil, fmt.Errorf("fst seek term: %w", err)
+		} else if errors.Is(err, vellum.ErrIteratorDone) {
+			break // no further terms will match
 		}
+
 		existingTerm, offset = fstIt.Current()
 		if slices.Compare(existingTerm, []byte(term)) != 0 {
 			continue // the term is not in the index
