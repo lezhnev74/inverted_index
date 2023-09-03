@@ -5,7 +5,6 @@ import (
 	lezhnev74 "github.com/lezhnev74/go-iterators"
 	"github.com/lezhnev74/inverted_index/single"
 	"github.com/stretchr/testify/require"
-
 	"os"
 	"path/filepath"
 	"testing"
@@ -24,7 +23,7 @@ func TestMerging(t *testing.T) {
 	existingIndexes := [][]indexTermData{
 		{ // todo, duplicate terms in indexes
 			indexTermData{"term1", []uint32{1, 6, 7}},
-			indexTermData{"term2", []uint32{10}},
+			indexTermData{"term2", []uint32{66}},
 			indexTermData{"term3", []uint32{}},
 		},
 		{
@@ -65,8 +64,13 @@ func TestMerging(t *testing.T) {
 	tit, err := r.ReadTerms()
 	require.NoError(t, err)
 	actualTerms := lezhnev74.ToSlice(tit)
-
 	require.EqualValues(t, expectedTerms, actualTerms)
+
+	expectedValues := []uint32{1, 6, 7, 9, 10, 11, 15, 20, 21, 22, 23, 24, 25, 66, 99, 500}
+	vit, err := r.ReadAllValues(actualTerms)
+	require.NoError(t, err)
+	actualValuse := lezhnev74.ToSlice(vit)
+	require.EqualValues(t, expectedValues, actualValuse)
 }
 
 func TestSelectingForMerge(t *testing.T) {

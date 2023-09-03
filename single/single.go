@@ -834,7 +834,7 @@ func (i *InvertedIndex[V]) selectSegments(index []segmentIndexEntry[V], b *roari
 		if (j + 1) < len(index) {
 			maxSegV = index[j+1].Min
 		}
-		if minVal >= maxSegV || maxVal < minSegV {
+		if minVal > maxSegV || maxVal < minSegV {
 			continue
 		}
 		index[k] = index[j]
