@@ -72,12 +72,12 @@ func MergeIndexes[V constraints.Ordered](
 	return w.Close()
 }
 
-func NewMultipleTermsReader(files []string) (lezhnev74.Iterator[string], error) {
+func NewMultipleTermsReader[T constraints.Ordered](files []string, unserializeFunc func([]byte) ([]T, error)) (lezhnev74.Iterator[string], error) {
 
 	tree := lezhnev74.NewSliceIterator([]string{})
 
 	for _, f := range files {
-		r, err := single.OpenInvertedIndex(f, single.DecompressUint32)
+		r, err := single.OpenInvertedIndex[T](f, unserializeFunc)
 		if err != nil {
 			tree.Close() // clean up
 			return nil, fmt.Errorf("open file %s: %w", f, err)

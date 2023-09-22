@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/exp/rand"
 	"golang.org/x/exp/slices"
+	"math"
 	"testing"
 	"time"
 )
@@ -55,6 +56,18 @@ func TestUint32CompressionRatioFuncs(t *testing.T) {
 	actualSize := len(encoded)
 
 	fmt.Printf("unc:\t%d\ncom:\t%d\nratio:\t%f%%\n", uncompressedEstimatedSize, actualSize, float64(actualSize)/float64(uncompressedEstimatedSize)*100)
+}
+
+func TestCompressUint64(t *testing.T) {
+	numbers := []uint64{0, 500, math.MaxUint64}
+
+	compressed, err := CompressUint64(numbers)
+	require.NoError(t, err)
+
+	decompressedNumbers, err := DecompressUint64(compressed)
+	require.NoError(t, err)
+
+	require.EqualValues(t, numbers, decompressedNumbers)
 }
 
 func TestUint32CompressionFuncs(t *testing.T) {

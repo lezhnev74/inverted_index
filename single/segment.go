@@ -57,6 +57,32 @@ func DecompressUint32(data []byte) (items []uint32, err error) {
 	return
 }
 
+func CompressUint64(items []uint64) ([]byte, error) {
+	b := make([]byte, 8)
+
+	encoded := intcomp.CompressUint64(items, nil)
+	out := make([]byte, 0, len(encoded)*8)
+
+	for _, u := range encoded {
+		binary.BigEndian.PutUint64(b[:8], u)
+		out = append(out, b[:8]...)
+	}
+
+	return out, nil
+}
+
+func DecompressUint64(data []byte) (items []uint64, err error) {
+	valueInts := make([]uint64, 0)
+
+	for i := 0; i < len(data); i += 8 {
+		valueInts = append(valueInts, binary.BigEndian.Uint64(data[i:i+8]))
+	}
+
+	items = intcomp.UncompressUint64(valueInts, nil)
+
+	return
+}
+
 func CompressGob[T any](items []T) ([]byte, error) {
 	w := new(bytes.Buffer)
 	enc := gob.NewEncoder(w)

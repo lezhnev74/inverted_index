@@ -118,7 +118,7 @@ func TestMultipleRead(t *testing.T) {
 	require.NoError(t, w2.Close())
 
 	// 2. Read terms from 2 files
-	rt, err := NewMultipleTermsReader([]string{filename1, filename2})
+	rt, err := NewMultipleTermsReader([]string{filename1, filename2}, single.DecompressUint32)
 	require.NoError(t, err)
 
 	actualT := lezhnev74.ToSlice(rt)

@@ -122,7 +122,7 @@ func TestAPI(t *testing.T) {
 				require.NoError(t, w.Put("term1", []int{1}))
 			},
 			assert: func(r InvertedIndexReader[int]) {
-				valuesIterator, err := r.ReadAllValues([]string{"term1"})
+				valuesIterator, err := r.ReadValues([]string{"term1"}, 0, 999)
 				require.NoError(t, err)
 				timestamps := lezhnev74.ToSlice(valuesIterator)
 				require.EqualValues(t, []int{1}, timestamps)
