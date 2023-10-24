@@ -3,7 +3,7 @@ package single
 import (
 	"fmt"
 	"github.com/blevesearch/vellum"
-	lezhnev74 "github.com/lezhnev74/go-iterators"
+	"github.com/lezhnev74/go-iterators"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/exp/rand"
 	"golang.org/x/exp/slices"
@@ -44,14 +44,14 @@ func TestAPI(t *testing.T) {
 				termsIterator, err := r.ReadTerms()
 				require.NoError(t, err)
 
-				terms := lezhnev74.ToSlice(termsIterator)
+				terms := go_iterators.ToSlice(termsIterator)
 				require.EqualValues(t, []string{"term"}, terms)
 
 				// 2 pass
 				termsIterator, err = r.ReadTerms()
 				require.NoError(t, err)
 
-				terms = lezhnev74.ToSlice(termsIterator)
+				terms = go_iterators.ToSlice(termsIterator)
 				require.EqualValues(t, []string{"term"}, terms)
 			},
 		}, {
@@ -65,7 +65,7 @@ func TestAPI(t *testing.T) {
 				termsIterator, err := r.ReadTerms()
 				require.NoError(t, err)
 
-				terms := lezhnev74.ToSlice(termsIterator)
+				terms := go_iterators.ToSlice(termsIterator)
 				require.EqualValues(t, []string{"term1", "term2"}, terms)
 			},
 		}, {
@@ -87,8 +87,21 @@ func TestAPI(t *testing.T) {
 			assert: func(r InvertedIndexReader[int]) {
 				it, err := r.ReadValues([]string{"term"}, 0, 100)
 				require.NoError(t, err)
-				terms := lezhnev74.ToSlice(it)
+				terms := go_iterators.ToSlice(it)
 				require.Empty(t, terms)
+			},
+		}, {
+			name:        "no terms read values",
+			segmentSize: 1000,
+			prepare: func(w InvertedIndexWriter[int]) {
+				require.NoError(t, w.Put("term", []int{1}))
+			},
+			assert: func(r InvertedIndexReader[int]) {
+				valuesIterator, err := r.ReadValues([]string{}, 0, 100)
+				require.NoError(t, err)
+
+				values := go_iterators.ToSlice(valuesIterator)
+				require.Empty(t, values)
 			},
 		}, {
 			name:        "read values for missing terms",
@@ -99,7 +112,7 @@ func TestAPI(t *testing.T) {
 			assert: func(r InvertedIndexReader[int]) {
 				it, err := r.ReadValues([]string{"UNKNOWN"}, 0, 100)
 				require.NoError(t, err)
-				terms := lezhnev74.ToSlice(it)
+				terms := go_iterators.ToSlice(it)
 				require.Empty(t, terms)
 			},
 		}, {
@@ -112,7 +125,7 @@ func TestAPI(t *testing.T) {
 			assert: func(r InvertedIndexReader[int]) {
 				it, err := r.ReadValues([]string{"term2", "term3"}, 0, 100)
 				require.NoError(t, err)
-				vals := lezhnev74.ToSlice(it)
+				vals := go_iterators.ToSlice(it)
 				require.EqualValues(t, []int{2}, vals)
 			},
 		}, {
@@ -124,7 +137,7 @@ func TestAPI(t *testing.T) {
 			assert: func(r InvertedIndexReader[int]) {
 				valuesIterator, err := r.ReadValues([]string{"term1"}, 0, 999)
 				require.NoError(t, err)
-				timestamps := lezhnev74.ToSlice(valuesIterator)
+				timestamps := go_iterators.ToSlice(valuesIterator)
 				require.EqualValues(t, []int{1}, timestamps)
 			},
 		}, {
@@ -137,7 +150,7 @@ func TestAPI(t *testing.T) {
 			assert: func(r InvertedIndexReader[int]) {
 				valuesIterator, err := r.ReadAllValues([]string{"term1", "term2"})
 				require.NoError(t, err)
-				timestamps := lezhnev74.ToSlice(valuesIterator)
+				timestamps := go_iterators.ToSlice(valuesIterator)
 				require.EqualValues(t, []int{1, 10, 20, 30}, timestamps)
 			},
 		}, {
@@ -150,7 +163,7 @@ func TestAPI(t *testing.T) {
 			assert: func(r InvertedIndexReader[int]) {
 				valuesIterator, err := r.ReadValues([]string{"term1", "term2"}, 0, math.MaxInt)
 				require.NoError(t, err)
-				timestamps := lezhnev74.ToSlice(valuesIterator)
+				timestamps := go_iterators.ToSlice(valuesIterator)
 				require.EqualValues(t, []int{1, 10, 20, 30}, timestamps)
 			},
 		}, {
@@ -163,7 +176,7 @@ func TestAPI(t *testing.T) {
 			assert: func(r InvertedIndexReader[int]) {
 				valuesIterator, err := r.ReadValues([]string{"term1", "term2"}, 0, math.MaxInt)
 				require.NoError(t, err)
-				timestamps := lezhnev74.ToSlice(valuesIterator)
+				timestamps := go_iterators.ToSlice(valuesIterator)
 				require.EqualValues(t, []int{1, 2, 3, 4, 5, 7, 9}, timestamps)
 			},
 		}, {
@@ -175,7 +188,7 @@ func TestAPI(t *testing.T) {
 			assert: func(r InvertedIndexReader[int]) {
 				valuesIterator, err := r.ReadValues([]string{"term1"}, 2, 3)
 				require.NoError(t, err)
-				timestamps := lezhnev74.ToSlice(valuesIterator)
+				timestamps := go_iterators.ToSlice(valuesIterator)
 				require.EqualValues(t, []int{2, 3}, timestamps)
 			},
 		}, {
@@ -187,7 +200,7 @@ func TestAPI(t *testing.T) {
 			assert: func(r InvertedIndexReader[int]) {
 				valuesIterator, err := r.ReadValues([]string{"term1"}, 9, 999)
 				require.NoError(t, err)
-				timestamps := lezhnev74.ToSlice(valuesIterator)
+				timestamps := go_iterators.ToSlice(valuesIterator)
 				require.EqualValues(t, []int{10, 20}, timestamps)
 			},
 		}, {
@@ -199,7 +212,7 @@ func TestAPI(t *testing.T) {
 			assert: func(r InvertedIndexReader[int]) {
 				valuesIterator, err := r.ReadValues([]string{"term1"}, 0, 7)
 				require.NoError(t, err)
-				timestamps := lezhnev74.ToSlice(valuesIterator)
+				timestamps := go_iterators.ToSlice(valuesIterator)
 				require.EqualValues(t, []int{1, 5}, timestamps)
 			},
 		}, {
@@ -212,7 +225,7 @@ func TestAPI(t *testing.T) {
 			assert: func(r InvertedIndexReader[int]) {
 				valuesIterator, err := r.ReadValues([]string{"term", "term2"}, 7, 999)
 				require.NoError(t, err)
-				timestamps := lezhnev74.ToSlice(valuesIterator)
+				timestamps := go_iterators.ToSlice(valuesIterator)
 				require.EqualValues(t, []int{7, 8, 10}, timestamps)
 			},
 		}, {
@@ -226,7 +239,7 @@ func TestAPI(t *testing.T) {
 			assert: func(r InvertedIndexReader[int]) {
 				valuesIterator, err := r.ReadValues([]string{"term2"}, 0, 999)
 				require.NoError(t, err)
-				timestamps := lezhnev74.ToSlice(valuesIterator)
+				timestamps := go_iterators.ToSlice(valuesIterator)
 				require.EqualValues(t, []int{4, 6, 8, 10, 12}, timestamps)
 			},
 		},
@@ -290,7 +303,7 @@ func TestUseUint32Compression(t *testing.T) {
 	require.NoError(t, err)
 	it, err := indexReader.ReadValues([]string{"term1"}, 0, 100)
 	require.NoError(t, err)
-	values := lezhnev74.ToSlice(it)
+	values := go_iterators.ToSlice(it)
 	require.EqualValues(t, []uint32{10, 20}, values)
 }
 
@@ -395,7 +408,7 @@ func TestHugeFile(t *testing.T) {
 	// Count total terms in the index
 	it, err := indexReader.ReadTerms()
 	require.NoError(t, err)
-	allTerms := lezhnev74.ToSlice(it)
+	allTerms := go_iterators.ToSlice(it)
 	require.Equal(t, 100, len(allTerms))
 
 	// Read sampled terms
@@ -407,7 +420,7 @@ func TestHugeFile(t *testing.T) {
 	it2, err := indexReader.ReadValues(sample[:1], 0, math.MaxUint32)
 	require.NoError(t, err)
 
-	v := lezhnev74.ToSlice(it2)
+	v := go_iterators.ToSlice(it2)
 	require.Equal(t, 1000, len(v))
 
 	require.NoError(t, indexReader.Close())
