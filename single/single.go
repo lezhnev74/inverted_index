@@ -92,11 +92,10 @@ type InvertedIndexWriter[V constraints.Ordered] interface {
 	io.Closer // flush FST
 	// Put must be called so terms are sorted, values must also be sorted beforehand
 	Put(term string, values []V) error
-	// Len returns bytes written to the files
-	Len() int64
 }
 
 type InvertedIndexReader[V constraints.Ordered] interface {
+	// ReadTerms returns sorted iterator
 	ReadTerms() (go_iterators.Iterator[string], error)
 	// ReadValues returns sorted iterator
 	ReadValues(terms []string, min V, max V) (go_iterators.Iterator[V], error)
