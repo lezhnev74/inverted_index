@@ -6,6 +6,8 @@ import (
 	"github.com/lezhnev74/go-iterators"
 	"github.com/lezhnev74/inverted_index/single"
 	"golang.org/x/exp/constraints"
+	"golang.org/x/exp/slices"
+	"log"
 	"math/rand"
 	"os"
 	"path"
@@ -25,6 +27,160 @@ type IndexDirectory[T constraints.Ordered] struct {
 	unserializeValues func([]byte) ([]T, error)
 }
 
+type DirectoryIndexMerger[T constraints.Ordered] struct {
+	indexDirectory    *IndexDirectory[T]
+	minFile, maxFiles int // how much to merge at one run
+}
+
+// Merge is synchronous.
+// It selects files for merging and proceeds the merge operation.
+// It returns merged files.
+func (m *DirectoryIndexMerger[T]) Merge() (files []*indexFile, err error) {
+	n := time.Now()
+
+	files, err = m.CheckMerge()
+	if err != nil {
+		return nil, fmt.Errorf("merging failed to start: %w", err)
+	}
+
+	if len(files) == 0 {
+		return // nothing to merge
+	}
+
+	totalSize := int64(0)
+	mergePaths := make([]string, 0, len(files))
+	for _, f := range files {
+		totalSize += f.len
+		mergePaths = append(mergePaths, f.path)
+	}
+
+	mergedFilename := m.indexDirectory.selectFilename()
+
+	mergedFileLen, err := m.mergeFiles(mergedFilename, mergePaths)
+	if err != nil {
+		return nil, fmt.Errorf("merging failed: %w", err)
+	}
+
+	m.indexDirectory.currentList.putFile(mergedFilename, mergedFileLen)
+
+	// move the merged files to another files list for removal
+	m.indexDirectory.currentList.removeFiles(files)
+	for _, f := range files {
+		m.indexDirectory.mergedList.putFile(f.path, f.len)
+	}
+
+	log.Printf(
+		"merged %d files (%d bytes total) in %s, new file size is %d bytes\n",
+		len(files),
+		totalSize,
+		time.Now().Sub(n).String(),
+		mergedFileLen,
+	)
+
+	return files, nil
+}
+
+// CheckMerge marks and returns files for merging.
+func (m *DirectoryIndexMerger[T]) CheckMerge() ([]*indexFile, error) {
+
+	// do not merge less than minMerge files
+	mergeFiles := make([]*indexFile, 0, m.maxFiles)
+
+	fileList := m.indexDirectory.currentList
+	fileList.safeRead(func() {
+		// files are sorted by len
+		for i := 0; i < len(fileList.files); i++ {
+
+			if fileList.files[i].merging {
+				continue
+			}
+
+			fileList.files[i].safeWrite(func() {
+				fileList.files[i].merging = true
+			})
+
+			mergeFiles = append(mergeFiles, fileList.files[i])
+
+			if len(mergeFiles) == cap(mergeFiles) {
+				break
+			}
+		}
+	})
+
+	if len(mergeFiles) < m.minFile {
+		return nil, nil
+	}
+
+	return mergeFiles, nil
+}
+
+func (m *DirectoryIndexMerger[T]) mergeFiles(dstFile string, srcFiles []string) (int64, error) {
+	// copy all terms to memory and release file pointers.
+	allTerms := make([]string, 0)
+
+	// below code uses one file descriptor at a time:
+	for _, f := range srcFiles {
+		r, err := single.OpenInvertedIndex(f, m.indexDirectory.unserializeValues)
+		if err != nil {
+			return 0, fmt.Errorf("open file %s: %w", f, err)
+		}
+
+		it, err := r.ReadTerms()
+		if err != nil {
+			return 0, fmt.Errorf("read terms %s: %w", f, err)
+		}
+
+		allTerms = append(allTerms, go_iterators.ToSlice(it)...)
+
+		err = r.Close()
+		if err != nil {
+			return 0, fmt.Errorf("read terms %s: %w", f, err)
+		}
+	}
+
+	// sort all the terms
+	slices.Sort(allTerms)
+
+	// prepare the new index file:
+	dstIndex, err := single.NewInvertedIndexUnit(dstFile, m.indexDirectory.segmentSize, m.indexDirectory.serializeValues, m.indexDirectory.unserializeValues)
+	if err != nil {
+		return 0, fmt.Errorf("unable to create new index %s: %w", dstFile, err)
+	}
+
+	// for each term, read all the values and push to the new index:
+	for _, term := range allTerms {
+		// get all values for this term from all indexes
+		termValues := make([]T, 0)
+		for _, srcFile := range srcFiles {
+			r, err := single.OpenInvertedIndex(srcFile, m.indexDirectory.unserializeValues)
+			if err != nil {
+				return 0, fmt.Errorf("open file %s: %w", srcFile, err)
+			}
+
+			vIt, err := r.ReadAllValues([]string{term})
+			if err != nil {
+				return 0, fmt.Errorf("read term values: %w", err)
+			}
+
+			termValues = append(termValues, go_iterators.ToSlice(vIt)...)
+
+			err = r.Close()
+			if err != nil {
+				return 0, fmt.Errorf("read term values: %w", err)
+			}
+		}
+
+		err = dstIndex.Put(term, termValues)
+		if err != nil {
+			return 0, fmt.Errorf("put to new index: %w", err)
+		}
+	}
+
+	err = dstIndex.Close()
+	size := dstIndex.(*single.InvertedIndex[T]).Len()
+	return size, err
+}
+
 type IndexDirectoryWriter[T constraints.Ordered] struct {
 	indexDirectory *IndexDirectory[T]
 	internalWriter single.InvertedIndexWriter[T]
@@ -33,11 +189,7 @@ type IndexDirectoryWriter[T constraints.Ordered] struct {
 
 func (d *IndexDirectory[T]) NewWriter() (single.InvertedIndexWriter[T], error) {
 
-	// filename selection
-	filename := path.Join(
-		d.directoryPath,
-		fmt.Sprintf("%d_%d", time.Now().UnixMicro(), rand.Int()),
-	)
+	filename := d.selectFilename()
 
 	w := &IndexDirectoryWriter[T]{
 		indexDirectory: d,
@@ -53,6 +205,15 @@ func (d *IndexDirectory[T]) NewWriter() (single.InvertedIndexWriter[T], error) {
 	}
 
 	return w, nil
+}
+
+func (d *IndexDirectory[T]) selectFilename() string {
+	// filename selection
+	filename := path.Join(
+		d.directoryPath,
+		fmt.Sprintf("%d_%d", time.Now().UnixMicro(), rand.Int()),
+	)
+	return filename
 }
 
 func (i *IndexDirectoryWriter[T]) Close() error {
@@ -86,6 +247,15 @@ func (d *IndexDirectory[T]) NewReader() (*IndexDirectoryReader[T], error) {
 		indexDirectory: d,
 	}
 	return r, nil
+}
+
+func (d *IndexDirectory[T]) NewMerger(min, max int) (*DirectoryIndexMerger[T], error) {
+	m := &DirectoryIndexMerger[T]{
+		indexDirectory: d,
+		minFile:        min,
+		maxFiles:       max,
+	}
+	return m, nil
 }
 
 func (i *IndexDirectoryReader[T]) ReadTerms() (go_iterators.Iterator[string], error) {
@@ -128,11 +298,11 @@ func joinIterators[T constraints.Ordered, V constraints.Ordered](
 			return nil, fmt.Errorf("read segments from %s: %w", singleFile.path, err)
 		}
 
-		singleFile.rlock.RLock()
+		singleFile.lock.RLock()
 
 		// wrap up the iterator to clean up upon closing
 		selectedIterator = go_iterators.NewClosingIterator(selectedIterator, func(innerErr error) (err error) {
-			defer singleFile.rlock.RUnlock() // release the underlying file
+			defer singleFile.lock.RUnlock() // release the underlying file
 			defer func() {
 				iteratorCloseError := ii.Close()
 				if err != nil {
