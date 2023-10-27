@@ -181,6 +181,36 @@ func (m *DirectoryIndexMerger[T]) mergeFiles(dstFile string, srcFiles []string) 
 	return size, err
 }
 
+func (m *DirectoryIndexMerger[T]) Cleanup() (err error) {
+	m.indexDirectory.mergedList.safeWrite(func() {
+		removedFiles := make([]*indexFile, 0)
+
+		for _, file := range m.indexDirectory.mergedList.files {
+			if file.lock.TryLock() {
+				removeErr := os.Remove(file.path)
+				if removeErr != nil {
+					err = removeErr
+				} else {
+					removedFiles = append(removedFiles, file)
+				}
+			}
+		}
+
+		// forget removed files
+		x := 0
+		for i := 0; i < len(m.indexDirectory.mergedList.files); i++ {
+			f := m.indexDirectory.mergedList.files[i]
+			if !slices.Contains(removedFiles, f) {
+				m.indexDirectory.mergedList.files[x] = f
+				x++
+			}
+		}
+		m.indexDirectory.mergedList.files = m.indexDirectory.mergedList.files[:x]
+	})
+
+	return
+}
+
 type IndexDirectoryWriter[T constraints.Ordered] struct {
 	indexDirectory *IndexDirectory[T]
 	internalWriter single.InvertedIndexWriter[T]

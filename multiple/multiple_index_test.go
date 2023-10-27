@@ -4,6 +4,8 @@ import (
 	go_iterators "github.com/lezhnev74/go-iterators"
 	"github.com/lezhnev74/inverted_index/single"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/exp/maps"
+	"golang.org/x/exp/slices"
 	"os"
 	"testing"
 )
@@ -158,23 +160,20 @@ func TestItValidatesDirectoryPermissions(t *testing.T) {
 }
 
 func TestCheckMerge(t *testing.T) {
-	dirPath, _ := os.MkdirTemp("", "")
-	defer os.RemoveAll(dirPath)
 
-	dirIndex, err := NewTestIndexDirectory(dirPath)
-	require.NoError(t, err)
+	prepared := []map[string][]uint32{
+		{"term0": {0}},
+		{"term1": {1}},
+		{"term2": {2}},
+		{"term3": {3}},
+	}
+	cleanup, dirIndex := prepareDirectoryIndex(t, prepared)
+	defer cleanup()
 
 	expectedTerms := []string{"term0", "term1", "term2", "term3"}
 	expectedValues := []uint32{0, 1, 2, 3}
-	for i, term := range expectedTerms {
-		w, err := dirIndex.NewWriter()
-		require.NoError(t, err)
-		err = w.Put(term, []uint32{uint32(i)})
-		require.NoError(t, err)
-		err = w.Close()
-		require.NoError(t, err)
-	}
 
+	// this function makes sure merging does not change the data contained in the index
 	assertIndex := func() {
 		r, err := dirIndex.NewReader()
 		require.NoError(t, err)
@@ -227,6 +226,39 @@ func TestCheckMerge(t *testing.T) {
 	require.Len(t, dirIndex.mergedList.files, 5)  // merged 2 files + 3 existing
 
 	assertIndex()
+
+	// Remove merged files
+	err = merger.Cleanup()
+	require.NoError(t, err)
+	require.Len(t, dirIndex.mergedList.files, 0)
+
+	assertIndex()
+}
+
+func prepareDirectoryIndex(t *testing.T, values []map[string][]uint32) (cleanup func(), dirIndex *IndexDirectory[uint32]) {
+	dirPath, _ := os.MkdirTemp("", "")
+	cleanup = func() { os.RemoveAll(dirPath) }
+
+	var err error
+	dirIndex, err = NewTestIndexDirectory(dirPath)
+	require.NoError(t, err)
+
+	for _, file := range values {
+		w, err := dirIndex.NewWriter()
+		require.NoError(t, err)
+
+		terms := maps.Keys(file)
+		slices.Sort(terms)
+		for _, term := range terms {
+			err = w.Put(term, file[term])
+			require.NoError(t, err)
+		}
+
+		err = w.Close()
+		require.NoError(t, err)
+	}
+
+	return
 }
 
 func NewTestIndexDirectory(path string) (*IndexDirectory[uint32], error) {
