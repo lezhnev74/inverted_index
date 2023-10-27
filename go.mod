@@ -2,6 +2,9 @@ module github.com/lezhnev74/inverted_index
 
 go 1.21.0
 
+replace (
+	github.com/lezhnev74/go-iterators => /home/dmitry/Code/go/src/go-iterators
+)
 require (
 	github.com/RoaringBitmap/roaring v1.6.0
 	github.com/alexeyco/simpletable v1.0.0

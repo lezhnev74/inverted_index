@@ -6,6 +6,7 @@ import (
 	"github.com/lezhnev74/go-iterators"
 	"github.com/lezhnev74/inverted_index/single"
 	"golang.org/x/exp/constraints"
+	"math/rand"
 	"os"
 	"path"
 	"time"
@@ -31,9 +32,16 @@ type IndexDirectoryWriter[T constraints.Ordered] struct {
 }
 
 func (d *IndexDirectory[T]) NewWriter() (single.InvertedIndexWriter[T], error) {
+
+	// filename selection
+	filename := path.Join(
+		d.directoryPath,
+		fmt.Sprintf("%d_%d", time.Now().UnixMicro(), rand.Int()),
+	)
+
 	w := &IndexDirectoryWriter[T]{
 		indexDirectory: d,
-		filename:       path.Join(d.directoryPath, fmt.Sprintf("%d", time.Now().UnixMicro())), // filename selection
+		filename:       filename,
 	}
 
 	var err error
@@ -106,27 +114,25 @@ func joinIterators[T constraints.Ordered, V constraints.Ordered](
 	fileList.lock.RLock()
 	defer fileList.lock.RUnlock()
 
-	openIndexes := make(map[*indexFile]single.InvertedIndexReader[T], len(fileList.files))
+	for _, singleFile := range fileList.files {
+		singleFile := singleFile // capture the variable
 
-	for _, indexFile := range fileList.files {
-
-		ii, err := single.OpenInvertedIndex(indexFile.path, i.indexDirectory.unserializeValues)
+		ii, err := single.OpenInvertedIndex(singleFile.path, i.indexDirectory.unserializeValues)
 		if err != nil {
-			return nil, fmt.Errorf("open index at %s: %w", indexFile.path, err)
+			return nil, fmt.Errorf("open index at %s: %w", singleFile.path, err)
 		}
-		openIndexes[indexFile] = ii
 
 		selectedIterator, err := selectIterator(ii)
 		if err != nil {
 			_ = ii.Close()
-			return nil, fmt.Errorf("read segments from %s: %w", indexFile.path, err)
+			return nil, fmt.Errorf("read segments from %s: %w", singleFile.path, err)
 		}
 
-		indexFile.rlock.RLock()
+		singleFile.rlock.RLock()
 
 		// wrap up the iterator to clean up upon closing
 		selectedIterator = go_iterators.NewClosingIterator(selectedIterator, func(innerErr error) (err error) {
-			defer indexFile.rlock.RUnlock() // release the underlying file
+			defer singleFile.rlock.RUnlock() // release the underlying file
 			defer func() {
 				iteratorCloseError := ii.Close()
 				if err != nil {
@@ -134,11 +140,7 @@ func joinIterators[T constraints.Ordered, V constraints.Ordered](
 				}
 			}()
 
-			if innerErr != nil {
-				return innerErr
-			}
-
-			return
+			return innerErr
 		})
 
 		iterator = go_iterators.NewUniqueSelectingIterator(iterator, selectedIterator, cmp.Compare[V])
@@ -160,8 +162,8 @@ func (i *IndexDirectoryReader[T]) ReadValues(terms []string, min T, max T) (go_i
 }
 
 func (i *IndexDirectoryReader[T]) Close() error {
-
-	panic("implement me")
+	// no closing is happening here as actual closing must be called on the iterators received from the reader apps.
+	return nil
 }
 
 func NewIndexDirectory[T constraints.Ordered](

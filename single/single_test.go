@@ -282,7 +282,7 @@ func TestFileSizeReported(t *testing.T) {
 
 	// Real size
 	fstat, _ := os.Stat(filename)
-	require.Equal(t, fstat.Size(), indexWriter.Len())
+	require.Equal(t, fstat.Size(), indexWriter.(*InvertedIndex[int]).Len())
 }
 
 func TestUseUint32Compression(t *testing.T) {

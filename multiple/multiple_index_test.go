@@ -74,6 +74,53 @@ func TestReadWrite(t *testing.T) {
 				// Close
 				require.NoError(t, valuesIterator.Close())
 				require.ErrorIs(t, valuesIterator.Close(), go_iterators.ClosedIterator)
+
+				require.NoError(t, r.Close())
+				require.NoError(t, r.Close())
+			},
+		},
+		{
+			name: "read from multiple files",
+			prepare: func(indexDir *IndexDirectory[uint32]) {
+
+				// write to multiple files:
+				for i := 0; i < 100; i++ {
+					w, err := indexDir.NewWriter()
+					require.NoError(t, err)
+
+					err = w.(single.InvertedIndexWriter[uint32]).Put("term1", []uint32{1, 2})
+					require.NoError(t, err)
+					err = w.(single.InvertedIndexWriter[uint32]).Put("term2", []uint32{2, 3})
+					require.NoError(t, err)
+
+					err = w.(single.InvertedIndexWriter[uint32]).Close()
+					require.NoError(t, err)
+				}
+
+			},
+			assert: func(indexDir *IndexDirectory[uint32], t *testing.T) {
+				r, err := indexDir.NewReader()
+				require.NoError(t, err)
+
+				// read terms
+				termsIterator, err := r.ReadTerms()
+				require.NoError(t, err)
+
+				terms := go_iterators.ToSlice(termsIterator)
+				expectedTerms := []string{"term1", "term2"}
+				require.EqualValues(t, expectedTerms, terms)
+
+				// read values
+				valuesIterator, err := r.ReadValues([]string{"term1", "term2"}, 0, 100)
+				require.NoError(t, err)
+
+				values := go_iterators.ToSlice(valuesIterator)
+				expectedValues := []uint32{1, 2, 3}
+				require.EqualValues(t, expectedValues, values)
+
+				// Close
+				require.NoError(t, valuesIterator.Close())
+				require.ErrorIs(t, valuesIterator.Close(), go_iterators.ClosedIterator)
 			},
 		},
 	}
