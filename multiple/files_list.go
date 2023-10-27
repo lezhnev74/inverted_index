@@ -5,6 +5,7 @@ import (
 	"sync"
 )
 
+// indexFile contains no mutable data, so it can be read concurrently
 type indexFile struct {
 	// lock is only used to track active readers (so the file can't be deleted)
 	lock sync.RWMutex
@@ -12,15 +13,6 @@ type indexFile struct {
 	path string
 	/* len is used in merging policy to merge the smallest files first */
 	len int64
-	/* marks the file as in-merge process */
-	merging bool
-}
-
-func (f *indexFile) safeWrite(fn func()) {
-	f.lock.Lock()
-	defer f.lock.Unlock()
-
-	fn()
 }
 
 /*
@@ -73,6 +65,11 @@ func (f *filesList) putFile(path string, fileSize int64) {
 		len:  fileSize,
 		lock: sync.RWMutex{},
 	}
+
+	f.putFileP(newFile)
+}
+
+func (f *filesList) putFileP(newFile *indexFile) {
 
 	// For the purposes of merging, files are sorted by size asc
 	pos, _ := slices.BinarySearchFunc(f.files, newFile, func(a, b *indexFile) int {

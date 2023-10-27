@@ -205,7 +205,7 @@ func TestCheckMerge(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, files, 3)
 	require.Len(t, dirIndex.currentList.files, 2) // 2 files remain after it is done
-	require.Len(t, dirIndex.mergedList.files, 3)  // merged 3 files
+	require.Len(t, merger.mergedList.files, 3)    // merged 3 files
 
 	assertIndex()
 
@@ -214,7 +214,7 @@ func TestCheckMerge(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, files, 2)
 	require.Len(t, dirIndex.currentList.files, 1) // 1 file remain after it is done
-	require.Len(t, dirIndex.mergedList.files, 5)  // merged 2 files + 3 existing
+	require.Len(t, merger.mergedList.files, 5)    // merged 2 files + 3 existing
 
 	assertIndex()
 
@@ -223,16 +223,54 @@ func TestCheckMerge(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, files, 0)
 	require.Len(t, dirIndex.currentList.files, 1) // 1 file remain after it is done
-	require.Len(t, dirIndex.mergedList.files, 5)  // merged 2 files + 3 existing
+	require.Len(t, merger.mergedList.files, 5)    // merged 2 files + 3 existing
 
 	assertIndex()
 
 	// Remove merged files
 	err = merger.Cleanup()
 	require.NoError(t, err)
-	require.Len(t, dirIndex.mergedList.files, 0)
+	require.Len(t, merger.mergedList.files, 0)
 
 	assertIndex()
+}
+
+func TestMergedFilesAreKeptUntilReadingIsDone(t *testing.T) {
+
+	prepared := []map[string][]uint32{
+		{"term0": {0}},
+		{"term1": {1}},
+	}
+	cleanup, dirIndex := prepareDirectoryIndex(t, prepared)
+	defer cleanup()
+
+	// start reading from all files
+	reader, err := dirIndex.NewReader()
+	require.NoError(t, err)
+	iterator, err := reader.ReadTerms()
+	require.NoError(t, err)
+
+	// Now merge files
+	merger, err := dirIndex.NewMerger(2, 2)
+	require.NoError(t, err)
+
+	mergedFiles, err := merger.Merge()
+	require.NoError(t, err)
+	require.Len(t, mergedFiles, 2)
+
+	// Now attempt to remove merged files
+	err = merger.Cleanup()
+	require.NoError(t, err)
+	require.Len(t, merger.mergedList.files, 2) // See them remain
+
+	// Now close the iterator
+	err = iterator.Close()
+	require.NoError(t, err)
+
+	// Now attempt to remove merged files again
+	err = merger.Cleanup()
+	require.NoError(t, err)
+	require.Len(t, merger.mergedList.files, 0) // See them gone
 }
 
 func prepareDirectoryIndex(t *testing.T, values []map[string][]uint32) (cleanup func(), dirIndex *IndexDirectory[uint32]) {

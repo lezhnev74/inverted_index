@@ -18,8 +18,8 @@ import (
 // it supports the same read/write API as a single index file
 // and also manages concurrent merging process (removing merged files to keep the disk space low).
 type IndexDirectory[T constraints.Ordered] struct {
-	directoryPath           string
-	currentList, mergedList *filesList
+	directoryPath string
+	currentList   *filesList
 
 	// index config
 	segmentSize       uint32
@@ -30,6 +30,8 @@ type IndexDirectory[T constraints.Ordered] struct {
 type DirectoryIndexMerger[T constraints.Ordered] struct {
 	indexDirectory    *IndexDirectory[T]
 	minFile, maxFiles int // how much to merge at one run
+	merging           map[string]struct{}
+	mergedList        *filesList
 }
 
 // Merge is synchronous.
@@ -66,7 +68,7 @@ func (m *DirectoryIndexMerger[T]) Merge() (files []*indexFile, err error) {
 	// move the merged files to another files list for removal
 	m.indexDirectory.currentList.removeFiles(files)
 	for _, f := range files {
-		m.indexDirectory.mergedList.putFile(f.path, f.len)
+		m.mergedList.putFileP(f)
 	}
 
 	log.Printf(
@@ -84,34 +86,34 @@ func (m *DirectoryIndexMerger[T]) Merge() (files []*indexFile, err error) {
 func (m *DirectoryIndexMerger[T]) CheckMerge() ([]*indexFile, error) {
 
 	// do not merge less than minMerge files
-	mergeFiles := make([]*indexFile, 0, m.maxFiles)
+	mergeBatch := make([]*indexFile, 0, m.maxFiles)
 
 	fileList := m.indexDirectory.currentList
 	fileList.safeRead(func() {
 		// files are sorted by len
 		for i := 0; i < len(fileList.files); i++ {
 
-			if fileList.files[i].merging {
+			if _, ok := m.merging[fileList.files[i].path]; ok {
 				continue
 			}
 
-			fileList.files[i].safeWrite(func() {
-				fileList.files[i].merging = true
-			})
+			// at this point I want to mark the file as being merged,
+			// but this file can be read at the moment, so I can't modify it
+			m.merging[fileList.files[i].path] = struct{}{}
 
-			mergeFiles = append(mergeFiles, fileList.files[i])
+			mergeBatch = append(mergeBatch, fileList.files[i])
 
-			if len(mergeFiles) == cap(mergeFiles) {
+			if len(mergeBatch) == cap(mergeBatch) {
 				break
 			}
 		}
 	})
 
-	if len(mergeFiles) < m.minFile {
+	if len(mergeBatch) < m.minFile {
 		return nil, nil
 	}
 
-	return mergeFiles, nil
+	return mergeBatch, nil
 }
 
 func (m *DirectoryIndexMerger[T]) mergeFiles(dstFile string, srcFiles []string) (int64, error) {
@@ -182,30 +184,33 @@ func (m *DirectoryIndexMerger[T]) mergeFiles(dstFile string, srcFiles []string) 
 }
 
 func (m *DirectoryIndexMerger[T]) Cleanup() (err error) {
-	m.indexDirectory.mergedList.safeWrite(func() {
+	m.mergedList.safeWrite(func() {
 		removedFiles := make([]*indexFile, 0)
 
-		for _, file := range m.indexDirectory.mergedList.files {
-			if file.lock.TryLock() {
-				removeErr := os.Remove(file.path)
-				if removeErr != nil {
-					err = removeErr
-				} else {
-					removedFiles = append(removedFiles, file)
-				}
+		for _, file := range m.mergedList.files {
+			if !file.lock.TryLock() {
+				continue
+			}
+			file.lock.Unlock()
+
+			removeErr := os.Remove(file.path)
+			if removeErr != nil {
+				err = removeErr
+			} else {
+				removedFiles = append(removedFiles, file)
 			}
 		}
 
 		// forget removed files
 		x := 0
-		for i := 0; i < len(m.indexDirectory.mergedList.files); i++ {
-			f := m.indexDirectory.mergedList.files[i]
+		for i := 0; i < len(m.mergedList.files); i++ {
+			f := m.mergedList.files[i]
 			if !slices.Contains(removedFiles, f) {
-				m.indexDirectory.mergedList.files[x] = f
+				m.mergedList.files[x] = f
 				x++
 			}
 		}
-		m.indexDirectory.mergedList.files = m.indexDirectory.mergedList.files[:x]
+		m.mergedList.files = m.mergedList.files[:x]
 	})
 
 	return
@@ -284,6 +289,8 @@ func (d *IndexDirectory[T]) NewMerger(min, max int) (*DirectoryIndexMerger[T], e
 		indexDirectory: d,
 		minFile:        min,
 		maxFiles:       max,
+		merging:        make(map[string]struct{}),
+		mergedList:     NewFilesList(),
 	}
 	return m, nil
 }
@@ -379,7 +386,6 @@ func NewIndexDirectory[T constraints.Ordered](
 	index := &IndexDirectory[T]{
 		directoryPath: path,
 		currentList:   NewFilesList(),
-		mergedList:    NewFilesList(),
 
 		segmentSize:       segmentSize,
 		serializeValues:   serializeValues,
