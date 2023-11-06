@@ -11,6 +11,7 @@ import (
 	"math/rand"
 	"os"
 	"path"
+	"sync"
 	"time"
 )
 
@@ -30,8 +31,11 @@ type IndexDirectory[T constraints.Ordered] struct {
 type DirectoryIndexMerger[T constraints.Ordered] struct {
 	indexDirectory    *IndexDirectory[T]
 	minFile, maxFiles int // how much to merge at one run
-	merging           map[string]struct{}
-	mergedList        *filesList
+
+	mergedList *filesList // merged files are to be removed after no one reads them
+
+	merging     map[string]struct{} // a copy of file paths that are being merged at the moment
+	mergingLock sync.RWMutex
 }
 
 // Merge is synchronous.
@@ -63,12 +67,16 @@ func (m *DirectoryIndexMerger[T]) Merge() (files []*indexFile, err error) {
 		return nil, fmt.Errorf("merging failed: %w", err)
 	}
 
-	m.indexDirectory.currentList.putFile(mergedFilename, mergedFileLen)
+	m.indexDirectory.currentList.safeWrite(func() {
+		m.indexDirectory.currentList.putFile(mergedFilename, mergedFileLen)
+	})
 
 	// move the merged files to another files list for removal
 	m.indexDirectory.currentList.removeFiles(files)
 	for _, f := range files {
-		m.mergedList.putFileP(f)
+		m.mergedList.safeWrite(func() {
+			m.mergedList.putFileP(f)
+		})
 	}
 
 	log.Printf(
@@ -93,13 +101,17 @@ func (m *DirectoryIndexMerger[T]) CheckMerge() ([]*indexFile, error) {
 		// files are sorted by len
 		for i := 0; i < len(fileList.files); i++ {
 
+			m.mergingLock.Lock()
+
 			if _, ok := m.merging[fileList.files[i].path]; ok {
+				m.mergingLock.Unlock()
 				continue
 			}
 
 			// at this point I want to mark the file as being merged,
 			// but this file can be read at the moment, so I can't modify it
 			m.merging[fileList.files[i].path] = struct{}{}
+			m.mergingLock.Unlock()
 
 			mergeBatch = append(mergeBatch, fileList.files[i])
 
@@ -142,6 +154,7 @@ func (m *DirectoryIndexMerger[T]) mergeFiles(dstFile string, srcFiles []string) 
 
 	// sort all the terms
 	slices.Sort(allTerms)
+	allTerms = uniqueOnly(allTerms)
 
 	// prepare the new index file:
 	dstIndex, err := single.NewInvertedIndexUnit(dstFile, m.indexDirectory.segmentSize, m.indexDirectory.serializeValues, m.indexDirectory.unserializeValues)
@@ -202,6 +215,9 @@ func (m *DirectoryIndexMerger[T]) Cleanup() (err error) {
 		}
 
 		// forget removed files
+		m.mergingLock.Lock()
+		defer m.mergingLock.Unlock()
+
 		x := 0
 		for i := 0; i < len(m.mergedList.files); i++ {
 			f := m.mergedList.files[i]
@@ -285,6 +301,10 @@ func (d *IndexDirectory[T]) NewReader() (*IndexDirectoryReader[T], error) {
 }
 
 func (d *IndexDirectory[T]) NewMerger(min, max int) (*DirectoryIndexMerger[T], error) {
+	if min > max || min < 2 {
+		return nil, fmt.Errorf("invalid min/max")
+	}
+
 	m := &DirectoryIndexMerger[T]{
 		indexDirectory: d,
 		minFile:        min,
@@ -417,4 +437,15 @@ func checkPermissions(path string) error {
 	}
 
 	return nil
+}
+
+func uniqueOnly[T comparable](values []T) []T {
+	x := 0
+	for i := 0; i < len(values); i++ {
+		if !slices.Contains(values[i+1:], values[i]) {
+			values[x] = values[i]
+			x++
+		}
+	}
+	return values[:x]
 }

@@ -6,8 +6,11 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/exp/maps"
 	"golang.org/x/exp/slices"
+	"log"
 	"os"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestReadWrite(t *testing.T) {
@@ -132,7 +135,7 @@ func TestReadWrite(t *testing.T) {
 			dirPath, _ := os.MkdirTemp("", "")
 			defer os.RemoveAll(dirPath)
 
-			index, err := NewTestIndexDirectory(dirPath)
+			index, err := newTestIndexDirectory(dirPath)
 			require.NoError(t, err)
 			tt.prepare(index)
 			tt.assert(index, t)
@@ -145,17 +148,17 @@ func TestItValidatesDirectoryPermissions(t *testing.T) {
 	defer os.RemoveAll(dirPath)
 
 	// valid directory
-	_, err := NewTestIndexDirectory(dirPath)
+	_, err := newTestIndexDirectory(dirPath)
 	require.NoError(t, err)
 
 	// not writable permissions
 	require.NoError(t, os.Chmod(dirPath, 0400))
-	_, err = NewTestIndexDirectory(dirPath)
+	_, err = newTestIndexDirectory(dirPath)
 	require.ErrorContains(t, err, "the directory is not writable")
 
 	// not writable permissions
 	require.NoError(t, os.Chmod(dirPath, 0200))
-	_, err = NewTestIndexDirectory(dirPath)
+	_, err = newTestIndexDirectory(dirPath)
 	require.ErrorContains(t, err, "the directory is not readable")
 }
 
@@ -163,15 +166,15 @@ func TestCheckMerge(t *testing.T) {
 
 	prepared := []map[string][]uint32{
 		{"term0": {0}},
+		{"term0": {0}}, // test deduplication
 		{"term1": {1}},
 		{"term2": {2}},
-		{"term3": {3}},
 	}
 	cleanup, dirIndex := prepareDirectoryIndex(t, prepared)
 	defer cleanup()
 
-	expectedTerms := []string{"term0", "term1", "term2", "term3"}
-	expectedValues := []uint32{0, 1, 2, 3}
+	expectedTerms := []string{"term0", "term1", "term2"}
+	expectedValues := []uint32{0, 1, 2}
 
 	// this function makes sure merging does not change the data contained in the index
 	assertIndex := func() {
@@ -273,12 +276,132 @@ func TestMergedFilesAreKeptUntilReadingIsDone(t *testing.T) {
 	require.Len(t, merger.mergedList.files, 0) // See them gone
 }
 
+func TestStressConcurrency(t *testing.T) {
+	deadline := time.Now().Add(time.Second) // keep the test this long
+	N := 100
+	wg := sync.WaitGroup{}
+	start := make(chan bool) // use it to start all goroutines at once
+
+	// prepare a directory index
+	// Prepare data
+	ingestionPayload := []map[string][]uint32{
+		{
+			"term0": {0, 1, 2, 3},
+			"term1": {1, 3, 10},
+		},
+		{
+			"term0": {0, 1, 2, 3},
+			"term1": {1, 3, 10},
+		},
+		{
+			"term3": {10, 20},
+			"term4": {11, 0},
+		},
+	}
+	cleanup, dirIndex := prepareDirectoryIndex(t, ingestionPayload) // make initial write
+	defer cleanup()
+
+	// N goroutines that writes to the index
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			<-start // wait for the start
+
+			for time.Now().Before(deadline) {
+				for _, file := range ingestionPayload {
+					w, err := dirIndex.NewWriter()
+					require.NoError(t, err)
+
+					terms := maps.Keys(file)
+					slices.Sort(terms)
+					for _, term := range terms {
+						err = w.Put(term, file[term])
+						require.NoError(t, err)
+					}
+
+					err = w.Close()
+					require.NoError(t, err)
+				}
+			}
+		}()
+	}
+
+	// N goroutines that merges + removes
+	merger, err := dirIndex.NewMerger(2, 3)
+	require.NoError(t, err)
+
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			<-start // wait for the start
+
+			for time.Now().Before(deadline) {
+				_, err := merger.Merge()
+				require.NoError(t, err)
+			}
+		}()
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			<-start // wait for the start
+
+			for time.Now().Before(deadline) {
+				err := merger.Cleanup()
+				require.NoError(t, err)
+			}
+		}()
+	}
+
+	// N goroutines that reads
+	expectedTerms := make([]string, 0)
+	for _, payload := range ingestionPayload {
+		expectedTerms = append(expectedTerms, maps.Keys(payload)...)
+	}
+	slices.Sort(expectedTerms)
+	expectedTerms = uniqueOnly(expectedTerms)
+
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			<-start // wait for the start
+
+			for time.Now().Before(deadline) {
+				reader, err := dirIndex.NewReader()
+				require.NoError(t, err)
+
+				iterator, err := reader.ReadTerms()
+				require.NoError(t, err)
+
+				terms := go_iterators.ToSlice(iterator)
+				if len(terms) != len(expectedTerms) {
+					log.Printf("err")
+				}
+				require.EqualValues(t, expectedTerms, terms)
+
+				err = reader.Close()
+				require.NoError(t, err)
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+}
+
 func prepareDirectoryIndex(t *testing.T, values []map[string][]uint32) (cleanup func(), dirIndex *IndexDirectory[uint32]) {
 	dirPath, _ := os.MkdirTemp("", "")
 	cleanup = func() { os.RemoveAll(dirPath) }
 
 	var err error
-	dirIndex, err = NewTestIndexDirectory(dirPath)
+	dirIndex, err = newTestIndexDirectory(dirPath)
 	require.NoError(t, err)
 
 	for _, file := range values {
@@ -299,7 +422,7 @@ func prepareDirectoryIndex(t *testing.T, values []map[string][]uint32) (cleanup 
 	return
 }
 
-func NewTestIndexDirectory(path string) (*IndexDirectory[uint32], error) {
+func newTestIndexDirectory(path string) (*IndexDirectory[uint32], error) {
 	return NewIndexDirectory[uint32](
 		path,
 		1000,
