@@ -60,29 +60,46 @@ err = itValues.Close()
 
 ### Maintaining Multiple Index Files
 
-As you keep indexing the source log files, to keep memory footprint low, we write many index files. Eventually we want
-to read data from those as if it was a single index.
+During indexing of large source files we split the indexed data in small index files (to keep the memory usage low).
+Eventually we want to read data from those as if it was a single index. `IndexDirectory` is a thread-safe service that
+allows reading from multiple index files as if there was just one, it supports concurrent merging activity on the index
+directory.
 
 ```go
-mr, err := NewMultipleValuesReader(
-[]string{filename1, filename2}, // individual index files
-decompressPostings,
-[]string{"term1", "term2"}, // select terms to read
-0,                          // min posting
-999999,                     // max posting
+var dirIndex *IndexDirectory[uint32] // set the type of the values in the index
+var err error
+dirIndex, err = NewIndexDirectory[uint32](
+    path, // the directory where index files are located
+    1000, // segments size (used for merging)
+    single.CompressUint32, 
+    single.DecompressUint32,
 )
 
-// The API is the same as for a single index file explained above.
+// Write to a new file:
+w, err := dirIndex.NewWriter() // returns single.InvertedIndexWriter[T], read the docs about single index files API
+// do the work and close:
+err = w.Close()
 
+// Read from multiple files:
+r, err := indexDir.NewReader() // *IndexDirectoryReader[T]
+termsIterator,err := r.ReadTerms()
+// do the work and close:
+err = termsIterator.Close()
 ```
 
-This lib offers means to merge smaller index files to a bigger one to preserve disk space.
+#### Merging
+
+Having many individual small files is beneficial during indexing, but these files can potentially contain duplicated data.
+So merging is a process of collapsing multiple indexing files into a single file. 
+This package supports merging and removing of merged files.
 
 ```go
-err = MergeIndexes(existingIndexFiles, newIndexFile, segmentSize, compressPostings, decompressPostings)
+var dirIndex *IndexDirectory[uint32]
+dirIndex = NewIndexDirectory[uint32](...)
 
-// you can model your merging policies accordingly.
-
+merger, err := dirIndex.NewMerger(2, 3) // min/max files to merge at a single pass
+files, err := merger.Merge() // run one pass of merging (can be done in a loop in a separate goroutine)
+err = merger.Cleanup() // remove merged files
 ```
 
 ## Design Details
@@ -116,6 +133,28 @@ Here is the file format used for the index. Made with [asciiflow.com](https://as
          │Segment1│ ... │SegmentN│IndexLen│Index│
          └────────┴─────┴────────┴────────┴─────┘
 
+```
+
+## File Inspector
+
+For a single index file we can run an inspection.
+```go
+// from source:
+go run main.go ./testdata/newFile
+
+Index File Summary
++----------------------------+--------------+
+| File total size            |          413 |
+| FST size                   |           75 |
+| Terms count                |            6 |
+| Terms min,max              | term0, term5 |
+| Bitmaps size               |          122 |
+| Values segments count/size |          8/2 |
+| Values index size          |           64 |
+| Values size                |          128 |
+| Values count (approx.)     |        14-16 |
+| Values min,max             |       1, 500 |
++----------------------------+--------------+
 ```
 
 ## Contribute

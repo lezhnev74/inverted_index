@@ -73,11 +73,12 @@ func (m *DirectoryIndexMerger[T]) Merge() (files []*indexFile, err error) {
 
 	// move the merged files to another files list for removal
 	m.indexDirectory.currentList.removeFiles(files)
-	for _, f := range files {
-		m.mergedList.safeWrite(func() {
+
+	m.mergedList.safeWrite(func() {
+		for _, f := range files {
 			m.mergedList.putFileP(f)
-		})
-	}
+		}
+	})
 
 	log.Printf(
 		"merged %d files (%d bytes total) in %s, new file size is %d bytes\n",

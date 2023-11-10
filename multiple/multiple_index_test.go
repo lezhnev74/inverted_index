@@ -329,7 +329,7 @@ func TestStressConcurrency(t *testing.T) {
 	}
 
 	// N goroutines that merges + removes
-	merger, err := dirIndex.NewMerger(2, 3)
+	merger, err := dirIndex.NewMerger(50, 100)
 	require.NoError(t, err)
 
 	for i := 0; i < 3; i++ {
@@ -394,6 +394,10 @@ func TestStressConcurrency(t *testing.T) {
 
 	close(start)
 	wg.Wait()
+
+	dirIndex.currentList.safeRead(func() {
+		log.Printf("total files remaining: %d", len(dirIndex.currentList.files))
+	})
 }
 
 func prepareDirectoryIndex(t *testing.T, values []map[string][]uint32) (cleanup func(), dirIndex *IndexDirectory[uint32]) {
