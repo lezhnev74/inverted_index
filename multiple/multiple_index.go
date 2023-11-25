@@ -44,7 +44,7 @@ type DirectoryIndexMerger[T constraints.Ordered] struct {
 func (m *DirectoryIndexMerger[T]) Merge() (files []*indexFile, err error) {
 	n := time.Now()
 
-	files, err = m.CheckMerge()
+	files, err = m.checkMerge()
 	if err != nil {
 		return nil, fmt.Errorf("merging failed to start: %w", err)
 	}
@@ -61,7 +61,6 @@ func (m *DirectoryIndexMerger[T]) Merge() (files []*indexFile, err error) {
 	}
 
 	mergedFilename := m.indexDirectory.selectFilename()
-
 	mergedFileLen, err := m.mergeFiles(mergedFilename, mergePaths)
 	if err != nil {
 		return nil, fmt.Errorf("merging failed: %w", err)
@@ -69,10 +68,9 @@ func (m *DirectoryIndexMerger[T]) Merge() (files []*indexFile, err error) {
 
 	m.indexDirectory.currentList.safeWrite(func() {
 		m.indexDirectory.currentList.putFile(mergedFilename, mergedFileLen)
+		// move the merged files to another files list for removal
+		m.indexDirectory.currentList.removeFiles(files)
 	})
-
-	// move the merged files to another files list for removal
-	m.indexDirectory.currentList.removeFiles(files)
 
 	m.mergedList.safeWrite(func() {
 		for _, f := range files {
@@ -91,8 +89,8 @@ func (m *DirectoryIndexMerger[T]) Merge() (files []*indexFile, err error) {
 	return files, nil
 }
 
-// CheckMerge marks and returns files for merging.
-func (m *DirectoryIndexMerger[T]) CheckMerge() ([]*indexFile, error) {
+// checkMerge marks and returns files for merging.
+func (m *DirectoryIndexMerger[T]) checkMerge() ([]*indexFile, error) {
 
 	// do not merge less than minMerge files
 	mergeBatch := make([]*indexFile, 0, m.maxFiles)
@@ -197,6 +195,7 @@ func (m *DirectoryIndexMerger[T]) mergeFiles(dstFile string, srcFiles []string) 
 	return size, err
 }
 
+// Cleanup removes files that are merged. Synchronous.
 func (m *DirectoryIndexMerger[T]) Cleanup() (err error) {
 	m.mergedList.safeWrite(func() {
 		removedFiles := make([]*indexFile, 0)
@@ -301,6 +300,7 @@ func (d *IndexDirectory[T]) NewReader() (*IndexDirectoryReader[T], error) {
 	return r, nil
 }
 
+// NewMerger creates a merging service that merges between min,max files in one pass.
 func (d *IndexDirectory[T]) NewMerger(min, max int) (*DirectoryIndexMerger[T], error) {
 	if min > max || min < 2 {
 		return nil, fmt.Errorf("invalid min/max")

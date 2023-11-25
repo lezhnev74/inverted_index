@@ -47,16 +47,14 @@ func (f *filesList) safeWrite(fn func()) {
 }
 
 func (f *filesList) removeFiles(files []*indexFile) {
-	f.safeWrite(func() {
-		x := 0
-		for _, existingFile := range f.files {
-			if !slices.Contains(files, existingFile) {
-				f.files[x] = existingFile
-				x++
-			}
+	x := 0
+	for _, existingFile := range f.files {
+		if !slices.Contains(files, existingFile) {
+			f.files[x] = existingFile
+			x++
 		}
-		f.files = f.files[:x]
-	})
+	}
+	f.files = f.files[:x]
 }
 func (f *filesList) putFile(path string, fileSize int64) {
 

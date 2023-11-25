@@ -9,7 +9,6 @@ import (
 	"github.com/RoaringBitmap/roaring"
 	"github.com/blevesearch/vellum"
 	"github.com/lezhnev74/go-iterators"
-
 	"golang.org/x/exp/constraints"
 	"golang.org/x/exp/slices"
 	"io"
@@ -306,7 +305,10 @@ func (i *InvertedIndex[V]) writeAllValues(values []V) (valuesIndexOffset int64, 
 func (i *InvertedIndex[V]) writeTermsBitmapsAndUpdateFST(bitmaps []*roaring.Bitmap) error {
 
 	// use our existing fst to iterate through terms in the same order as they were ingested
-	fst, err := vellum.Load(i.fstBuf.Bytes())
+	fstBuf := make([]byte, i.fstBuf.Len())
+	copy(fstBuf, i.fstBuf.Bytes()) // copy since the buf will be reused later
+
+	fst, err := vellum.Load(fstBuf)
 	if err != nil {
 		return fmt.Errorf("fst read failed: %w", err)
 	}

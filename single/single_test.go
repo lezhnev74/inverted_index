@@ -242,6 +242,41 @@ func TestAPI(t *testing.T) {
 				timestamps := go_iterators.ToSlice(valuesIterator)
 				require.EqualValues(t, []int{4, 6, 8, 10, 12}, timestamps)
 			},
+		}, {
+			name:        "mixed languages",
+			segmentSize: 1000,
+			prepare: func(w InvertedIndexWriter[int]) {
+				terms := []string{`التقديم`, `חתונה`, `бесплатно`, `zx9uyv`}
+				slices.Sort(terms)
+				for _, term := range terms {
+					require.NoError(t, w.Put(term, []int{1}))
+				}
+			},
+			assert: func(r InvertedIndexReader[int]) {
+				valuesIterator, err := r.ReadValues([]string{"бесплатно"}, 0, 999)
+				require.NoError(t, err)
+				timestamps := go_iterators.ToSlice(valuesIterator)
+				require.EqualValues(t, []int{1}, timestamps)
+			},
+		}, {
+			name:        "big chunk",
+			segmentSize: 1000,
+			prepare: func(w InvertedIndexWriter[int]) {
+				terms := []string{"term1"}
+				for i := 0; i < 1000; i++ {
+					terms = append(terms, fmt.Sprintf("%d", rand.Uint64()))
+				}
+				slices.Sort(terms)
+				for _, term := range terms {
+					require.NoError(t, w.Put(term, []int{1}))
+				}
+			},
+			assert: func(r InvertedIndexReader[int]) {
+				valuesIterator, err := r.ReadValues([]string{"term1"}, 0, 999)
+				require.NoError(t, err)
+				timestamps := go_iterators.ToSlice(valuesIterator)
+				require.EqualValues(t, []int{1}, timestamps)
+			},
 		},
 	}
 
