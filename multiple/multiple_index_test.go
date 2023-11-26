@@ -162,6 +162,32 @@ func TestItValidatesDirectoryPermissions(t *testing.T) {
 	require.ErrorContains(t, err, "the directory is not readable")
 }
 
+func TestItDiscoversFiles(t *testing.T) {
+	dirPath, _ := os.MkdirTemp("", "")
+	defer os.RemoveAll(dirPath)
+
+	// 1. Populate a directory with files
+	dirIndex, err := newTestIndexDirectory(dirPath)
+	require.NoError(t, err)
+
+	// 1.1 File A
+	w, err := dirIndex.NewWriter()
+	require.NoError(t, err)
+	w.Put("a", []uint32{1})
+	require.NoError(t, w.Close())
+
+	// 1.1 File B
+	w, err = dirIndex.NewWriter()
+	require.NoError(t, err)
+	w.Put("a", []uint32{1})
+	require.NoError(t, w.Close())
+
+	// 2. Open a new index from the same dir
+	dirIndex2, err := newTestIndexDirectory(dirPath)
+	require.NoError(t, err)
+	require.Len(t, dirIndex2.currentList.files, 2)
+}
+
 func TestCheckMerge(t *testing.T) {
 
 	prepared := []map[string][]uint32{

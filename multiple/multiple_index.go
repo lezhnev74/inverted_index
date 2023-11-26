@@ -316,6 +316,31 @@ func (d *IndexDirectory[T]) NewMerger(min, max int) (*DirectoryIndexMerger[T], e
 	return m, nil
 }
 
+// discover detects all existing index files in the root directory
+func (d *IndexDirectory[T]) discover() error {
+	dir, err := os.ReadDir(d.directoryPath)
+	if err != nil {
+		return err
+	}
+
+	for _, e := range dir {
+		if e.IsDir() {
+			continue
+		}
+
+		inf, err := e.Info()
+		if err != nil {
+			return err
+		}
+
+		d.currentList.safeWrite(func() {
+			d.currentList.putFile(e.Name(), inf.Size())
+		})
+	}
+
+	return nil
+}
+
 func (i *IndexDirectoryReader[T]) ReadTerms() (go_iterators.Iterator[string], error) {
 
 	iteratorSelect := func(ii single.InvertedIndexReader[T]) (go_iterators.Iterator[string], error) {
@@ -412,8 +437,9 @@ func NewIndexDirectory[T constraints.Ordered](
 		serializeValues:   serializeValues,
 		unserializeValues: unserializeValues,
 	}
+	err := index.discover()
 
-	return index, nil
+	return index, err
 }
 
 // checkPermissions tests the directory for read/write permissions.
