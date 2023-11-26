@@ -13,6 +13,11 @@ import (
 	"time"
 )
 
+func TestUniqueOnly(t *testing.T) {
+	s := []string{"B", "C", "A", "C", "C"}
+	require.Equal(t, []string{"A", "B", "C"}, sortUnique(s))
+}
+
 func TestReadWrite(t *testing.T) {
 	type test struct {
 		name    string
@@ -187,6 +192,26 @@ func TestItDiscoversFiles(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, dirIndex2.currentList.files, 2)
 }
+
+//
+// func TestMergeExternal(t *testing.T) {
+// 	dirPath := "/home/dmitry/Code/go/src/heaplog2/local/ii2/3801863248"
+// 	dirIndex, err := NewIndexDirectory[uint64](
+// 		dirPath,
+// 		1000,
+// 		single.CompressUint64,
+// 		single.DecompressUint64,
+// 	)
+// 	require.NoError(t, err)
+//
+// 	m, err := dirIndex.NewMerger(2, 2)
+// 	require.NoError(t, err)
+//
+// 	files, err := m.Merge()
+// 	require.NoError(t, err)
+//
+// 	log.Printf("%v", files)
+// }
 
 func TestCheckMerge(t *testing.T) {
 
@@ -390,7 +415,7 @@ func TestStressConcurrency(t *testing.T) {
 		expectedTerms = append(expectedTerms, maps.Keys(payload)...)
 	}
 	slices.Sort(expectedTerms)
-	expectedTerms = uniqueOnly(expectedTerms)
+	expectedTerms = sortUnique(expectedTerms)
 
 	for i := 0; i < N; i++ {
 		wg.Add(1)

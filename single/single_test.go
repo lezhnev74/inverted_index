@@ -463,3 +463,26 @@ func TestHugeFile(t *testing.T) {
 	// show summary
 	PrintSummary(filename, os.Stdout)
 }
+
+func TestBitmapsCachePreload(t *testing.T) {
+	dirPath, err := os.MkdirTemp("", "")
+	require.NoError(t, err)
+	filename := filepath.Join(dirPath, "index")
+
+	// 1. Make a new index (open in writer mode), put values and close.
+	indexWriter, err := NewInvertedIndexUnit[int](filename, 1, CompressGob[int], DecompressGob[int])
+	require.NoError(t, err)
+	require.NoError(t, indexWriter.Put("term1", []int{10, 20})) // <-- two segments will be written (len=1)
+	err = indexWriter.Close()
+	require.NoError(t, err)
+
+	// 2. Open the index in a reader-mode
+	indexReader, err := OpenInvertedIndex[int](filename, DecompressGob[int])
+	require.NoError(t, err)
+	it, err := indexReader.ReadValues([]string{"term1"}, 0, 100)
+	require.NoError(t, err)
+	require.NoError(t, it.Close())
+
+	_, err = indexReader.(*InvertedIndex[int]).file.Seek(0, io.SeekStart)
+	require.ErrorIs(t, err, os.ErrClosed)
+}

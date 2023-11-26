@@ -85,6 +85,8 @@ type InvertedIndex[V cmp.Ordered] struct {
 	fst                    *vellum.FST
 	fstBuf                 *bytes.Buffer
 	fstOffset, indexOffset int64
+	// bitmaps cache stores all bitmaps indexed by file offsets
+	bitmaps map[int64]*roaring.Bitmap
 }
 
 type InvertedIndexWriter[V constraints.Ordered] interface {
@@ -145,7 +147,7 @@ func (i *InvertedIndex[V]) ReadValues(terms []string, minVal V, maxVal V) (go_it
 	// Read all terms bitmaps and join into one.
 	// Use it to select segments for reading.
 
-	bs, err := i.readBitmaps(terms)
+	bs, err := i.readTermsBitmaps(terms)
 	if err != nil {
 		return nil, fmt.Errorf("bitmaps: %w", err)
 	}
@@ -549,8 +551,8 @@ func (i *InvertedIndex[V]) readFooter() (
 	return
 }
 
-func (i *InvertedIndex[V]) readBitmaps(terms []string) ([]*roaring.Bitmap, error) {
-
+// readTermsBitmaps returns all bitmaps associated with the given terms
+func (i *InvertedIndex[V]) readTermsBitmaps(terms []string) ([]*roaring.Bitmap, error) {
 	slices.Sort(terms)
 
 	fstIt, err := i.fst.Iterator([]byte(terms[0]), nil)
@@ -561,13 +563,11 @@ func (i *InvertedIndex[V]) readBitmaps(terms []string) ([]*roaring.Bitmap, error
 	}
 
 	var (
-		offset, nextOffset uint64
-		bitmapLen          int
-		existingTerm       []byte
+		offset       uint64
+		existingTerm []byte
 	)
 
 	bitmaps := make([]*roaring.Bitmap, 0, len(terms))
-	buf := make([]byte, 4096)
 
 	for _, term := range terms {
 
@@ -587,37 +587,9 @@ func (i *InvertedIndex[V]) readBitmaps(terms []string) ([]*roaring.Bitmap, error
 		err = fstIt.Next()
 		if err != nil && !errors.Is(err, vellum.ErrIteratorDone) {
 			return nil, fmt.Errorf("fst read: %w", err)
-		} else if errors.Is(err, vellum.ErrIteratorDone) {
-			nextOffset = uint64(i.fstOffset) // the last bitmap abuts FST
-		} else {
-			_, nextOffset = fstIt.Current()
 		}
 
-		// read the bitmap
-		_, err = i.file.Seek(int64(offset), io.SeekStart)
-		if err != nil {
-			return nil, fmt.Errorf("seek bitmap: %w", err)
-		}
-
-		bitmapLen = int(nextOffset - offset)
-		if cap(buf) >= bitmapLen {
-			buf = buf[:bitmapLen]
-		} else {
-			buf = make([]byte, bitmapLen)
-		}
-
-		// _, err = i.file.Read(buf)
-		// if err != nil {
-		//	return nil, fmt.Errorf("read bitmap: %w", err)
-		// }
-
-		b := roaring.New()
-		_, err = b.ReadFrom(i.file)
-
-		if err != nil {
-			return nil, fmt.Errorf("parse bitmap: %w", err)
-		}
-		bitmaps = append(bitmaps, b)
+		bitmaps = append(bitmaps, i.bitmaps[int64(offset)])
 	}
 
 	return bitmaps, nil
@@ -789,6 +761,52 @@ func (i *InvertedIndex[V]) makeSegmentsFetchFunc(
 	return makeFetchFunc(), nil
 }
 
+// readBitmaps populates internal cache with all bitmaps in the file
+func (i *InvertedIndex[V]) readBitmaps() error {
+
+	if i.bitmaps != nil { // already cached
+		return nil
+	}
+	i.bitmaps = make(map[int64]*roaring.Bitmap)
+
+	mTerm, _ := i.fst.GetMinKey()
+	fileBitmapsOffset, _, _ := i.fst.Get(mTerm)
+	bitmapsLen := i.fstOffset - int64(fileBitmapsOffset)
+
+	// Load all bitmaps bytes into memory
+	_, err := i.file.Seek(int64(fileBitmapsOffset), io.SeekStart)
+	if err != nil {
+		return err
+	}
+
+	bitmapsMem := make([]byte, bitmapsLen)
+	_, err = i.file.Read(bitmapsMem)
+	if err != nil {
+		return err
+	}
+
+	// now extract bitmaps for each term in FST
+	it, err := i.fst.Iterator(nil, nil)
+	if err != nil {
+		return err
+	}
+	for err == nil {
+		_, termBitmapOffset := it.Current()
+		termBitmapBufferOffset := termBitmapOffset - fileBitmapsOffset // adapt to buffer boundaries
+
+		termBitmap := roaring.New()
+		_, err = termBitmap.ReadFrom(bytes.NewBuffer(bitmapsMem[termBitmapBufferOffset:]))
+		if err != nil {
+			return fmt.Errorf("parse bitmap: %w", err)
+		}
+		i.bitmaps[int64(termBitmapOffset)] = termBitmap
+
+		err = it.Next()
+	}
+
+	return nil
+}
+
 func NewInvertedIndexUnit[V constraints.Ordered](
 	filename string,
 	segmentSize uint32,
@@ -847,6 +865,13 @@ func OpenInvertedIndex[V constraints.Ordered](
 	i.indexOffset = indexOffset
 	i.minVal = minValue
 	i.maxVal = maxValue
+
+	// to reduce seeks and reads, it is a good idea to load all bitmaps into memory once,
+	// then use that cache for querying bitmaps.
+	err = i.readBitmaps()
+	if err != nil {
+		return nil, err
+	}
 
 	return i, nil
 }

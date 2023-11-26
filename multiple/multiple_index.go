@@ -7,6 +7,7 @@ import (
 	"github.com/lezhnev74/inverted_index/single"
 	"golang.org/x/exp/constraints"
 	"golang.org/x/exp/slices"
+	"golang.org/x/sync/errgroup"
 	"log"
 	"math/rand"
 	"os"
@@ -128,32 +129,37 @@ func (m *DirectoryIndexMerger[T]) checkMerge() ([]*indexFile, error) {
 }
 
 func (m *DirectoryIndexMerger[T]) mergeFiles(dstFile string, srcFiles []string) (int64, error) {
-	// copy all terms to memory and release file pointers.
-	allTerms := make([]string, 0)
 
-	// below code uses one file descriptor at a time:
+	// Open all indexes in advance. Schedule clean-up.
+	fileIndexes := make(map[string]single.InvertedIndexReader[T])
+	defer func() {
+		for _, ii := range fileIndexes {
+			ii.Close()
+		}
+	}()
 	for _, f := range srcFiles {
 		r, err := single.OpenInvertedIndex(f, m.indexDirectory.unserializeValues)
 		if err != nil {
 			return 0, fmt.Errorf("open file %s: %w", f, err)
 		}
+		fileIndexes[f] = r
+	}
 
-		it, err := r.ReadTerms()
+	// copy all terms to memory and release file pointers.
+	allTerms := make([]string, 0)
+
+	// below code uses one file descriptor at a time:
+	for _, f := range srcFiles {
+		it, err := fileIndexes[f].ReadTerms()
 		if err != nil {
 			return 0, fmt.Errorf("read terms %s: %w", f, err)
 		}
 
 		allTerms = append(allTerms, go_iterators.ToSlice(it)...)
-
-		err = r.Close()
-		if err != nil {
-			return 0, fmt.Errorf("read terms %s: %w", f, err)
-		}
 	}
 
 	// sort all the terms
-	slices.Sort(allTerms)
-	allTerms = uniqueOnly(allTerms)
+	allTerms = sortUnique(allTerms)
 
 	// prepare the new index file:
 	dstIndex, err := single.NewInvertedIndexUnit(dstFile, m.indexDirectory.segmentSize, m.indexDirectory.serializeValues, m.indexDirectory.unserializeValues)
@@ -162,28 +168,41 @@ func (m *DirectoryIndexMerger[T]) mergeFiles(dstFile string, srcFiles []string) 
 	}
 
 	// for each term, read all the values and push to the new index:
+	// for faster processing, we start N workers here to handle all the terms
+	termValuesMap := make(map[string][]T, len(allTerms))
+	termValuesMapLock := sync.Mutex{}
+
+	var wg errgroup.Group
+	for _, r := range fileIndexes {
+		r := r
+		wg.Go(func() error {
+			fileTermValues := make(map[string][]T)
+			for _, term := range allTerms {
+				vIt, err := r.ReadAllValues([]string{term})
+				if err != nil {
+					return fmt.Errorf("read term values: %w", err)
+				}
+
+				fileTermValues[term] = go_iterators.ToSlice(vIt)
+			}
+
+			termValuesMapLock.Lock()
+			for term, values := range fileTermValues {
+				termValuesMap[term] = append(termValuesMap[term], values...)
+			}
+			termValuesMapLock.Unlock()
+
+			return nil
+		})
+	}
+
+	err = wg.Wait()
+	if err != nil {
+		return 0, err
+	}
+
 	for _, term := range allTerms {
-		// get all values for this term from all indexes
-		termValues := make([]T, 0)
-		for _, srcFile := range srcFiles {
-			r, err := single.OpenInvertedIndex(srcFile, m.indexDirectory.unserializeValues)
-			if err != nil {
-				return 0, fmt.Errorf("open file %s: %w", srcFile, err)
-			}
-
-			vIt, err := r.ReadAllValues([]string{term})
-			if err != nil {
-				return 0, fmt.Errorf("read term values: %w", err)
-			}
-
-			termValues = append(termValues, go_iterators.ToSlice(vIt)...)
-
-			err = r.Close()
-			if err != nil {
-				return 0, fmt.Errorf("read term values: %w", err)
-			}
-		}
-
+		termValues := termValuesMap[term]
 		err = dstIndex.Put(term, termValues)
 		if err != nil {
 			return 0, fmt.Errorf("put to new index: %w", err)
@@ -334,7 +353,8 @@ func (d *IndexDirectory[T]) discover() error {
 		}
 
 		d.currentList.safeWrite(func() {
-			d.currentList.putFile(e.Name(), inf.Size())
+			filePath := path.Join(d.directoryPath, e.Name())
+			d.currentList.putFile(filePath, inf.Size())
 		})
 	}
 
@@ -466,10 +486,15 @@ func checkPermissions(path string) error {
 	return nil
 }
 
-func uniqueOnly[T comparable](values []T) []T {
+// sortUnique sorts and removes duplicates from the slice.
+func sortUnique[T constraints.Ordered](values []T) []T {
+
+	slices.Sort(values)
+
+	// since the slice is sorted, we can only compare with the next element
 	x := 0
 	for i := 0; i < len(values); i++ {
-		if !slices.Contains(values[i+1:], values[i]) {
+		if i == len(values)-1 || values[i] != values[i+1] {
 			values[x] = values[i]
 			x++
 		}
