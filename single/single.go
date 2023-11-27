@@ -86,7 +86,8 @@ type InvertedIndex[V cmp.Ordered] struct {
 	fstBuf                 *bytes.Buffer
 	fstOffset, indexOffset int64
 	// bitmaps cache stores all bitmaps indexed by file offsets
-	bitmaps map[int64]*roaring.Bitmap
+	bitmaps       map[int64]*roaring.Bitmap
+	segmentsIndex []segmentIndexEntry[V]
 }
 
 type InvertedIndexWriter[V constraints.Ordered] interface {
@@ -160,12 +161,7 @@ func (i *InvertedIndex[V]) ReadValues(terms []string, minVal V, maxVal V) (go_it
 		b.Or(bs[j])
 	}
 
-	segmentsIndex, err := i.readValuesIndex()
-	if err != nil {
-		return nil, fmt.Errorf("read values index: %w", err)
-	}
-
-	segmentsIndex = i.selectSegments(segmentsIndex, b, minVal, maxVal)
+	segmentsIndex := i.preselectSegments(b, minVal, maxVal)
 
 	valuesFetchFunc, err := i.makeSegmentsFetchFunc(segmentsIndex, b, minVal, maxVal)
 	if err != nil {
@@ -217,6 +213,7 @@ func (i *InvertedIndex[V]) ReadTerms() (go_iterators.Iterator[string], error) {
 	return itWrap, nil
 }
 
+// getAllTermValues makes a single sorted slice of all unique values attached to terms
 func (i *InvertedIndex[V]) getAllTermValues() []V {
 	totalNum := 0
 	for _, tv := range i.termsValues {
@@ -226,15 +223,26 @@ func (i *InvertedIndex[V]) getAllTermValues() []V {
 	allValues := make([]V, 0, totalNum/2) // to avoid many allocations, start with 50% of total
 	for _, tv := range i.termsValues {
 		for _, v := range tv {
-			if slices.Contains(allValues, v) {
-				continue
+
+			pos, exists := slices.BinarySearch(allValues, v)
+			if exists {
+				continue // skip duplication
 			}
-			allValues = append(allValues, v)
+
+			// insert at the sorted position
+			allValues = slicePutAt(allValues, pos, v)
 		}
 	}
-	slices.Sort(allValues)
 
 	return allValues
+}
+
+// slicePutAt is an efficient insertion function that avoid unnecessary allocations
+func slicePutAt[V any](dst []V, pos int, v V) []V {
+	dst = append(dst, v) // could grow here
+	copy(dst[pos+1:], dst[pos:])
+	dst[pos] = v
+	return dst
 }
 
 func (i *InvertedIndex[V]) mapTermValuesToBitmaps(allValues []V) []*roaring.Bitmap {
@@ -596,31 +604,30 @@ func (i *InvertedIndex[V]) readTermsBitmaps(terms []string) ([]*roaring.Bitmap, 
 }
 
 func (i *InvertedIndex[V]) readValuesIndex() (index []segmentIndexEntry[V], err error) {
-	buf := make([]byte, 4096)
+	buf := make([]byte, 100)
 
 	_, err = i.file.Seek(i.indexOffset, io.SeekStart)
 	if err != nil {
 		return nil, fmt.Errorf("seek: %w", err)
 	}
 
-	_, err = i.file.Read(buf)
+	n, err := i.file.Read(buf)
 	if err != nil {
 		return nil, fmt.Errorf("reading index len: %w", err)
 	}
 
 	indexLen := int64(binary.BigEndian.Uint64(buf[:8]))
-	if int64(cap(buf)) >= (indexLen + 8) {
-		// buf contains the index completely
-		buf = buf[8 : indexLen+8]
-	} else {
-		// read index required
-		buf = make([]byte, indexLen+8)
-		_, err = i.file.Read(buf)
+
+	if int64(n) < (indexLen + 8) {
+		// index is only partially in the buf
+		moreSpace := indexLen + 8 - int64(n)
+		buf = append(buf, make([]byte, moreSpace)...)
+		_, err = i.file.Read(buf[n:])
 		if err != nil {
 			return nil, fmt.Errorf("reading index len: %w", err)
 		}
-		buf = buf[8 : indexLen+8]
 	}
+	buf = buf[8 : indexLen+8] // skip the size
 
 	index, err = decodeSegmentsIndex(buf, i.unserializeSegment)
 	if err != nil {
@@ -639,20 +646,28 @@ func (i *InvertedIndex[V]) readValuesIndex() (index []segmentIndexEntry[V], err 
 	return
 }
 
-func (i *InvertedIndex[V]) selectSegments(index []segmentIndexEntry[V], b *roaring.Bitmap, minVal V, maxVal V) []segmentIndexEntry[V] {
+func (i *InvertedIndex[V]) preselectSegments(b *roaring.Bitmap, minVal, maxVal V) []segmentIndexEntry[V] {
 	// Note: preselection returns only segments that potentially can contain relevant values
 	// Based on min/max values and the terms bitmap
 
+	index := i.segmentsIndex // the index was pre-loaded
+
 	// Filter out segments based on bitmap
 	k := 0
-	for j := 0; j < len(index); j++ {
-		if !b.IntersectsWithInterval(uint64(j*int(i.segmentSize)), uint64((j+1)*int(i.segmentSize))) {
-			continue
+	lastMatchedSegment := -1
+	b.Iterate(func(v uint32) bool {
+		matchedSegment := v / i.segmentSize            // int division
+		if lastMatchedSegment == int(matchedSegment) { // this is to process each matched segment only once
+			return true
 		}
-		index[j].startNum = j * int(i.segmentSize)
-		index[k] = index[j]
+		lastMatchedSegment = int(matchedSegment)
+
+		index[matchedSegment].startNum = int(matchedSegment * i.segmentSize)
+		index[k] = index[matchedSegment]
 		k++
-	}
+		return true
+	})
+
 	index = index[:k]
 
 	// Filter out based on min/max values
@@ -871,6 +886,11 @@ func OpenInvertedIndex[V constraints.Ordered](
 	err = i.readBitmaps()
 	if err != nil {
 		return nil, err
+	}
+
+	i.segmentsIndex, err = i.readValuesIndex()
+	if err != nil {
+		return nil, fmt.Errorf("read values index: %w", err)
 	}
 
 	return i, nil
