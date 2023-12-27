@@ -13,6 +13,20 @@ import (
 	"time"
 )
 
+func TestHugeFile(t *testing.T) {
+	indexDir, err := NewIndexDirectory("/home/dmitry/Code/go/src/heaplog2/local/ii", 1000, single.CompressUint64, single.DecompressUint64)
+	require.NoError(t, err)
+
+	r, err := indexDir.NewReader()
+	require.NoError(t, err)
+
+	_, err = r.ReadTerms()
+	require.NoError(t, err)
+
+	err = r.Close()
+	require.NoError(t, err)
+}
+
 func TestUniqueOnly(t *testing.T) {
 	s := []string{"B", "C", "A", "C", "C"}
 	require.Equal(t, []string{"A", "B", "C"}, sortUnique(s))

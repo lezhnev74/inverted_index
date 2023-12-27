@@ -11,7 +11,7 @@ require (
 	github.com/ronanh/intcomp v1.1.0
 	github.com/stretchr/testify v1.8.4
 	github.com/urfave/cli/v2 v2.25.7
-	golang.org/x/exp v0.0.0-20231110203233-9a3e6036ecaa
+	golang.org/x/exp v0.0.0-20231226003508-02704c960a9b
 )
 
 require (
