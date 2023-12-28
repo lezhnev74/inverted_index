@@ -8,12 +8,12 @@ import (
 
 func PrintSummary(filename string, out io.Writer) error {
 
-	i, err := OpenInvertedIndex(filename, DecompressUint64)
+	i, err := OpenInvertedIndex(filename, DecompressUint32)
 	if err != nil {
 		return err
 	}
 
-	r := i.(*InvertedIndex[uint64])
+	r := i.(*InvertedIndex[uint32])
 
 	fileSize := r.mmapFile.Len()
 	_, fstOffset, fstLen, _, _, _, err := r.readFooter()
