@@ -95,8 +95,9 @@ type InvertedIndexWriter[V constraints.Ordered] interface {
 type InvertedIndexReader[V constraints.Ordered] interface {
 	// ReadTerms returns sorted iterator
 	ReadTerms() (go_iterators.Iterator[string], error)
-	// ReadValues returns sorted iterator
+	// ReadValues returns sorted values
 	ReadValues(terms []string, min V, max V) ([]V, error)
+	// ReadAllValues returns sorted values
 	ReadAllValues(terms []string) ([]V, error)
 	io.Closer
 }
@@ -149,24 +150,17 @@ func (i *InvertedIndex[V]) ReadValues(terms []string, minVal V, maxVal V) ([]V, 
 
 	retValues := make([]V, 0, 100)
 
-	slices.Sort(terms)
-	it, err := i.fst.Iterator([]byte(terms[0]), nil)
-	if err != nil && !errors.Is(err, vellum.ErrIteratorDone) {
-		return nil, err
-	} else if errors.Is(err, vellum.ErrIteratorDone) {
-		return nil, nil
-	}
-	defer it.Close()
-
 	var (
-		buf = make([]byte, 4096)
-		n   int
+		buf    = make([]byte, 4096)
+		n      int
+		values []V
 	)
-	for err == nil {
-		curTerm, valuesOffset := it.Current()
-
-		if !slices.Contains(terms, string(curTerm)) {
-			err = it.Next()
+	for _, t := range terms {
+		valuesOffset, ok, err := i.fst.Get([]byte(t))
+		if err != nil {
+			return nil, fmt.Errorf("read values: %w", err)
+		}
+		if !ok {
 			continue
 		}
 
@@ -179,7 +173,7 @@ func (i *InvertedIndex[V]) ReadValues(terms []string, minVal V, maxVal V) ([]V, 
 		segmentSize := binary.BigEndian.Uint32(buf[:4])
 		if segmentSize > uint32(n-4) {
 			// we need to read more
-			buf = make([]byte, 0, segmentSize+4)
+			buf = make([]byte, segmentSize+4)
 
 			n, err = i.mmapFile.ReadAt(buf, int64(valuesOffset))
 			if err != nil {
@@ -187,18 +181,18 @@ func (i *InvertedIndex[V]) ReadValues(terms []string, minVal V, maxVal V) ([]V, 
 			}
 		}
 
-		values, err := i.unserializeSegment(buf[4:])
+		values, err = i.unserializeSegment(buf[4 : segmentSize+4])
 		if err != nil {
 			return nil, fmt.Errorf("read values: unserialize: %w", err)
 		}
 
 		retValues = append(retValues, values...)
+	}
 
-		err = it.Next()
-	}
-	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, vellum.ErrIteratorDone) {
-		return nil, fmt.Errorf("read values: %w", err)
-	}
+	retValues = sliceSortUnique(retValues)
+	retValues = sliceFilterInPlace(retValues, func(v V) bool {
+		return v >= minVal && v <= maxVal
+	})
 
 	return retValues, nil
 }
@@ -245,6 +239,37 @@ func slicePutAt[V any](dst []V, pos int, v V) []V {
 	copy(dst[pos+1:], dst[pos:])
 	dst[pos] = v
 	return dst
+}
+
+// sliceFilterInPlace does not allocate
+func sliceFilterInPlace[T any](input []T, filter func(elem T) bool) []T {
+	n := 0
+	for _, elem := range input {
+		if filter(elem) {
+			input[n] = elem
+			n++
+		}
+	}
+	return input[:n]
+}
+
+// sliceSortUnique removes duplicates in place, returns sorted values
+func sliceSortUnique[V constraints.Ordered](s []V) []V {
+	slices.Sort(s)
+
+	if len(s) == 0 {
+		return s
+	}
+
+	k := 1
+	for i := 1; i < len(s); i++ {
+		if s[i] != s[k-1] {
+			s[k] = s[i]
+			k++
+		}
+	}
+
+	return s[:k]
 }
 
 func (i *InvertedIndex[V]) writeFooter(fstL int) error {
@@ -367,7 +392,7 @@ func (i *InvertedIndex[V]) readFooter() (
 	buf := make([]byte, 4096)
 	fstLenSize := int64(8)
 	minMaxSize := int64(4)
-	totalSizes := fstLenSize + minMaxSize
+	tailSize := fstLenSize + minMaxSize
 
 	var (
 		fstLen int64
@@ -377,7 +402,7 @@ func (i *InvertedIndex[V]) readFooter() (
 	// read the end of the file for parsing footer
 	fileSize := int64(i.mmapFile.Len())
 
-	if fileSize <= totalSizes {
+	if fileSize <= tailSize {
 		// This is a naive protection, works for empty files, does not cover all corruptions.
 		// For proper file consistency it should check a hashsum.
 		err = fmt.Errorf("the file size is too small (%d bytes), probably corrupted", fileSize)
@@ -401,9 +426,9 @@ func (i *InvertedIndex[V]) readFooter() (
 	fstOffset = fileSize - minMaxLen - fstLen - minMaxSize - fstLenSize
 
 	// read fst body (fst goes before minmax values, so when we have that, we have everything)
-	if fstLen > int64(n)-minMaxLen-totalSizes { // do we need to read more bytes?
+	if fstLen > int64(n)-minMaxLen-tailSize { // do we need to read more bytes?
 		// yes, we need to read more
-		p = fstLen + minMaxLen + totalSizes
+		p = fstLen + minMaxLen + tailSize
 		offset = fileSize - p
 
 		// read both fst + mmvalues
@@ -414,12 +439,12 @@ func (i *InvertedIndex[V]) readFooter() (
 		}
 
 		mmBuf = buf[n-int(minMaxLen):]
-		buf = buf[:n-n-int(minMaxLen)]
+		buf = buf[:n-int(minMaxLen)]
 
 	} else {
 		// if FST is in the buf already, that means minMax values are there too
-		mmBuf = buf[n-int(minMaxLen+totalSizes) : int64(n)-totalSizes]
-		buf = buf[n-int(fstLen+minMaxLen+totalSizes) : int64(n)-totalSizes-minMaxLen]
+		mmBuf = buf[n-int(minMaxLen+tailSize) : int64(n)-tailSize]
+		buf = buf[n-int(fstLen+minMaxLen+tailSize) : int64(n)-tailSize-minMaxLen]
 	}
 
 	fst, err = vellum.Load(buf)

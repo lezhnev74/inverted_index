@@ -15,6 +15,13 @@ import (
 	"time"
 )
 
+func TestSortUnique(t *testing.T) {
+	require.Equal(t, []int{}, sliceSortUnique([]int{}))
+	require.Equal(t, []int{1}, sliceSortUnique([]int{1}))
+	require.Equal(t, []int{1, 2}, sliceSortUnique([]int{2, 1}))
+	require.Equal(t, []int{1, 2, 3}, sliceSortUnique([]int{3, 2, 1, 2}))
+}
+
 func TestAPI(t *testing.T) {
 	type test struct {
 		name    string
