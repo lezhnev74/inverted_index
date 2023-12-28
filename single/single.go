@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/blevesearch/vellum"
-	"github.com/lezhnev74/go-iterators"
 	"golang.org/x/exp/constraints"
 	"golang.org/x/exp/mmap"
 	"golang.org/x/exp/slices"
@@ -94,7 +93,7 @@ type InvertedIndexWriter[V constraints.Ordered] interface {
 
 type InvertedIndexReader[V constraints.Ordered] interface {
 	// ReadTerms returns sorted iterator
-	ReadTerms() (go_iterators.Iterator[string], error)
+	ReadTerms() ([]string, error)
 	// ReadValues returns sorted values
 	ReadValues(terms []string, min V, max V) ([]V, error)
 	// ReadAllValues returns sorted values
@@ -201,36 +200,25 @@ func (i *InvertedIndex[V]) ReadAllValues(terms []string) ([]V, error) {
 	return i.ReadValues(terms, i.minVal, i.maxVal)
 }
 
-func (i *InvertedIndex[V]) ReadTerms() (go_iterators.Iterator[string], error) {
+func (i *InvertedIndex[V]) ReadTerms() ([]string, error) {
 	it, err := i.fst.Iterator(nil, nil)
 	if err != nil && !errors.Is(err, vellum.ErrIteratorDone) {
 		return nil, err
 	} else if errors.Is(err, vellum.ErrIteratorDone) {
-		return go_iterators.NewSliceIterator([]string{}), nil
+		return nil, nil
 	}
 
-	var lastErr error
-	itWrap := go_iterators.NewCallbackIterator(
-		func() (v string, err error) {
-			if lastErr != nil {
-				if errors.Is(lastErr, vellum.ErrIteratorDone) {
-					lastErr = go_iterators.EmptyIterator // override the internal error
-				}
-				return "", lastErr
-			}
-			term, _ := it.Current()
-			if len(term) == 0 {
-				return "", go_iterators.ClosedIterator
-			}
-			v = string(term)
-			lastErr = it.Next()
-			return
-		},
-		func() error {
-			return nil
-		})
+	terms := make([]string, 0, i.fst.Len())
+	for err == nil {
+		term, _ := it.Current()
+		terms = append(terms, string(term))
+		err = it.Next()
+	}
+	if err != nil && !errors.Is(err, vellum.ErrIteratorDone) {
+		return nil, fmt.Errorf("read terms: %w", err)
+	}
 
-	return itWrap, nil
+	return terms, nil
 }
 
 // slicePutAt is an efficient insertion function that avoid unnecessary allocations
@@ -384,6 +372,8 @@ func (i *InvertedIndex[V]) write() error {
 func (i *InvertedIndex[V]) readFooter() (
 	fst *vellum.FST,
 	fstOffset int64,
+	fstLen int64,
+	minMaxLen int64,
 	minValue V,
 	maxValue V,
 	err error,
@@ -395,8 +385,7 @@ func (i *InvertedIndex[V]) readFooter() (
 	tailSize := fstLenSize + minMaxSize
 
 	var (
-		fstLen int64
-		mmBuf  []byte
+		mmBuf []byte
 	)
 
 	// read the end of the file for parsing footer
@@ -419,7 +408,7 @@ func (i *InvertedIndex[V]) readFooter() (
 	}
 
 	// extract footer numbers
-	minMaxLen := int64(binary.BigEndian.Uint32(buf[int64(n)-minMaxSize : int64(n)]))
+	minMaxLen = int64(binary.BigEndian.Uint32(buf[int64(n)-minMaxSize : int64(n)]))
 
 	fstLen = int64(binary.BigEndian.Uint64(buf[int64(n)-minMaxSize-fstLenSize : int64(n)-minMaxSize]))
 
@@ -503,7 +492,7 @@ func OpenInvertedIndex[V constraints.Ordered](
 		mmapFile:           f,
 	}
 
-	fst, fstOffset, minValue, maxValue, err := i.readFooter()
+	fst, fstOffset, _, _, minValue, maxValue, err := i.readFooter()
 	if err != nil {
 		return nil, err
 	}

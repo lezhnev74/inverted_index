@@ -15,22 +15,23 @@ func PrintSummary(filename string, out io.Writer) error {
 
 	r := i.(*InvertedIndex[uint64])
 
+	fileSize := r.mmapFile.Len()
+	_, fstOffset, fstLen, _, _, _, err := r.readFooter()
+	if err != nil {
+		return err
+	}
+
 	// Prepare table rows
-	s, _ := r.file.Stat()
+
 	minTerm, _ := r.fst.GetMinKey()
 	maxTerm, _ := r.fst.GetMaxKey()
 
-	mTerm, _ := r.fst.GetMinKey()
-	bitmapOffset, _, _ := r.fst.Get(mTerm)
-	bitmapsLen := r.fstOffset - int64(bitmapOffset)
-
 	data := [][]interface{}{
-		{"File total size", fmt.Sprintf("%d", s.Size())},
-		{"FST size", fmt.Sprintf("%d", s.Size()-r.fstOffset-24)},
+		{"File total size", fmt.Sprintf("%d", fileSize)},
+		{"FST size", fmt.Sprintf("%d", fstLen)},
 		{"Terms count", fmt.Sprintf("%d", r.fst.Len())},
 		{"Terms min,max", fmt.Sprintf("%s, %s", string(minTerm), string(maxTerm))},
-		{"Bitmaps size", fmt.Sprintf("%d", bitmapsLen)},
-		{"Values size", fmt.Sprintf("%d", r.indexOffset)},
+		{"Values size", fmt.Sprintf("%d", fstOffset)},
 		{"Values min,max", fmt.Sprintf("%v, %v", r.minVal, r.maxVal)},
 	}
 

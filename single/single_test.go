@@ -2,7 +2,6 @@ package single
 
 import (
 	"fmt"
-	"github.com/lezhnev74/go-iterators"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/exp/rand"
 	"golang.org/x/exp/slices"
@@ -45,17 +44,13 @@ func TestAPI(t *testing.T) {
 			},
 			assert: func(r InvertedIndexReader[int]) {
 				// 1 pass
-				termsIterator, err := r.ReadTerms()
+				terms, err := r.ReadTerms()
 				require.NoError(t, err)
-
-				terms := go_iterators.ToSlice(termsIterator)
 				require.EqualValues(t, []string{"term"}, terms)
 
 				// 2 pass
-				termsIterator, err = r.ReadTerms()
+				terms, err = r.ReadTerms()
 				require.NoError(t, err)
-
-				terms = go_iterators.ToSlice(termsIterator)
 				require.EqualValues(t, []string{"term"}, terms)
 			},
 		}, {
@@ -66,10 +61,8 @@ func TestAPI(t *testing.T) {
 				require.NoError(t, w.Put("term2", []int{1}))
 			},
 			assert: func(r InvertedIndexReader[int]) {
-				termsIterator, err := r.ReadTerms()
+				terms, err := r.ReadTerms()
 				require.NoError(t, err)
-
-				terms := go_iterators.ToSlice(termsIterator)
 				require.EqualValues(t, []string{"term1", "term2"}, terms)
 			},
 		},
@@ -297,6 +290,7 @@ func TestAPI(t *testing.T) {
 			indexReader, err := OpenInvertedIndex[int](filename, DecompressGob[int])
 			require.NoError(t, err)
 			tt.assert(indexReader)
+			require.NoError(t, indexReader.Close())
 		})
 	}
 }

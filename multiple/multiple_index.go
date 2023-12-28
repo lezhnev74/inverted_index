@@ -150,19 +150,19 @@ func (m *DirectoryIndexMerger[T]) mergeFiles(dstFile string, srcFiles []string) 
 
 	// below code uses one file descriptor at a time:
 	for _, f := range srcFiles {
-		it, err := fileIndexes[f].ReadTerms()
+		tt, err := fileIndexes[f].ReadTerms()
 		if err != nil {
 			return 0, fmt.Errorf("read terms %s: %w", f, err)
 		}
 
-		allTerms = append(allTerms, go_iterators.ToSlice(it)...)
+		allTerms = append(allTerms, tt...)
 	}
 
 	// sort all the terms
 	allTerms = sortUnique(allTerms)
 
 	// prepare the new index file:
-	dstIndex, err := single.NewInvertedIndexUnit(dstFile, m.indexDirectory.segmentSize, m.indexDirectory.serializeValues, m.indexDirectory.unserializeValues)
+	dstIndex, err := single.NewInvertedIndexUnit(dstFile, m.indexDirectory.serializeValues, m.indexDirectory.unserializeValues)
 	if err != nil {
 		return 0, fmt.Errorf("unable to create new index %s: %w", dstFile, err)
 	}
@@ -178,12 +178,11 @@ func (m *DirectoryIndexMerger[T]) mergeFiles(dstFile string, srcFiles []string) 
 		wg.Go(func() error {
 			fileTermValues := make(map[string][]T)
 			for _, term := range allTerms {
-				vIt, err := r.ReadAllValues([]string{term})
+				v, err := r.ReadAllValues([]string{term})
 				if err != nil {
 					return fmt.Errorf("read term values: %w", err)
 				}
-
-				fileTermValues[term] = go_iterators.ToSlice(vIt)
+				fileTermValues[term] = v
 			}
 
 			termValuesMapLock.Lock()
@@ -268,7 +267,7 @@ func (d *IndexDirectory[T]) NewWriter() (single.InvertedIndexWriter[T], error) {
 
 	var err error
 
-	w.internalWriter, err = single.NewInvertedIndexUnit[T](w.filename, d.segmentSize, d.serializeValues, d.unserializeValues)
+	w.internalWriter, err = single.NewInvertedIndexUnit[T](w.filename, d.serializeValues, d.unserializeValues)
 	if err != nil {
 		defer os.Remove(w.filename)
 		return nil, fmt.Errorf("unable to make a new index: %w", err)
@@ -364,7 +363,11 @@ func (d *IndexDirectory[T]) discover() error {
 func (i *IndexDirectoryReader[T]) ReadTerms() (go_iterators.Iterator[string], error) {
 
 	iteratorSelect := func(ii single.InvertedIndexReader[T]) (go_iterators.Iterator[string], error) {
-		return ii.ReadTerms()
+		terms, err := ii.ReadTerms()
+		if err != nil {
+			return nil, err
+		}
+		return go_iterators.NewSliceIterator(terms), nil
 	}
 
 	return joinIterators(
@@ -424,7 +427,11 @@ func joinIterators[T constraints.Ordered, V constraints.Ordered](
 
 func (i *IndexDirectoryReader[T]) ReadValues(terms []string, min T, max T) (go_iterators.Iterator[T], error) {
 	iteratorSelect := func(ii single.InvertedIndexReader[T]) (go_iterators.Iterator[T], error) {
-		return ii.ReadValues(terms, min, max)
+		v, err := ii.ReadValues(terms, min, max)
+		if err != nil {
+			return nil, err
+		}
+		return go_iterators.NewSliceIterator(v), nil
 	}
 
 	return joinIterators(
