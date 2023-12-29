@@ -6,7 +6,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/exp/rand"
 	"golang.org/x/exp/slices"
-	"io"
 	"log"
 	"math"
 	"os"
@@ -385,7 +384,7 @@ func TestReaderClosesBeforeIteratorIsCompleteFile(t *testing.T) {
 
 	require.NoError(t, indexReader.Close())
 	_, err = it.Next()
-	require.ErrorIs(t, err, os.ErrClosed)
+	require.ErrorContains(t, err, "mmap: closed")
 }
 
 func TestUnableToCreateEmptyIndex(t *testing.T) {
@@ -399,30 +398,6 @@ func TestUnableToCreateEmptyIndex(t *testing.T) {
 	require.NoError(t, err)
 	err = indexWriter.Close()
 	require.ErrorIs(t, err, ErrEmptyIndex)
-}
-
-func TestClosedIteratorClosesTheFile(t *testing.T) {
-	dirPath, err := os.MkdirTemp("", "")
-	require.NoError(t, err)
-	defer os.RemoveAll(dirPath)
-	filename := filepath.Join(dirPath, "index")
-
-	// 1. Make a new index (open in writer mode), put values and close.
-	indexWriter, err := NewInvertedIndexUnit[int](filename, 1, CompressGob[int], DecompressGob[int])
-	require.NoError(t, err)
-	require.NoError(t, indexWriter.Put("term1", []int{10, 20})) // <-- two segments will be written (len=1)
-	err = indexWriter.Close()
-	require.NoError(t, err)
-
-	// 2. Open the index in a reader-mode
-	indexReader, err := OpenInvertedIndex[int](filename, DecompressGob[int])
-	require.NoError(t, err)
-	it, err := indexReader.ReadValues([]string{"term1"}, 0, 100)
-	require.NoError(t, err)
-	require.NoError(t, it.Close())
-
-	_, err = indexReader.(*InvertedIndex[int]).file.Seek(0, io.SeekStart)
-	require.ErrorIs(t, err, os.ErrClosed)
 }
 
 // func TestHugeFile(t *testing.T) {

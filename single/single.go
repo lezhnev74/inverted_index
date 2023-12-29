@@ -10,6 +10,7 @@ import (
 	"github.com/blevesearch/vellum"
 	"github.com/lezhnev74/go-iterators"
 	"golang.org/x/exp/constraints"
+	"golang.org/x/exp/mmap"
 	"golang.org/x/exp/slices"
 	"io"
 	"os"
@@ -45,7 +46,6 @@ var (
 // resembles a sorted map[string][]int
 // NOT CONCURRENT
 type InvertedIndex[V cmp.Ordered] struct {
-	file           *os.File
 	closeFile      sync.Once
 	filePos        int64
 	buf4, buf8     []byte // len buf
@@ -56,17 +56,18 @@ type InvertedIndex[V cmp.Ordered] struct {
 		However too small size increases the index and fseeks.
 	*/
 	segmentSize uint32
-
 	// Generic Values --------------------------------------------------
 	/*
 		serializeSegment is user-provided function to compress values
 		since Value is generic.
 	*/
-	serializeSegment   func(items []V) ([]byte, error)
+	serializeSegment func(items []V) ([]byte, error)
+
 	unserializeSegment func(data []byte) (items []V, err error)
 	cmp                func(a, b V) int // -1,0,1 to impose order on values
 
 	// Writer-mode -----------------------------------------------------
+	file *os.File
 	// Accumulates data and writes our on Close()
 	fstBuilder   *vellum.Builder
 	bytesWritten uint32
@@ -81,6 +82,7 @@ type InvertedIndex[V cmp.Ordered] struct {
 
 	// Reader-mode -----------------------------------------------------
 	// Reads immutable data in the file
+	mmapFile *mmap.ReaderAt
 	// fst allows to compress terms in the index file
 	fst                    *vellum.FST
 	fstBuf                 *bytes.Buffer
@@ -113,11 +115,20 @@ type InvertedIndexReader[V constraints.Ordered] interface {
 func (i *InvertedIndex[V]) Close() error {
 	defer i.closeFile.Do(func() { i.file.Close() })
 
+	// writer mode
 	if i.fstBuilder != nil {
 		if len(i.termsValues) == 0 {
 			return ErrEmptyIndex
 		}
 		return i.write()
+	}
+
+	// reader mode
+	if i.mmapFile != nil {
+		err := i.mmapFile.Close()
+		if err != nil {
+			return fmt.Errorf("index file close: %w", err)
+		}
 	}
 
 	return nil
@@ -466,27 +477,19 @@ func (i *InvertedIndex[V]) readFooter() (
 	)
 
 	// read the end of the file for parsing footer
-	fstat, err := i.file.Stat()
-	if err != nil {
-		return
-	}
-	fileSize := fstat.Size()
+	fileSize := int64(i.mmapFile.Len())
 
-	if fstat.Size() <= totalSizes {
+	if fileSize <= totalSizes {
 		// This is a naive protection, works for empty files, does not cover all corruptions.
 		// For proper file consistency it should check a hashsum.
-		err = fmt.Errorf("the file size is too small (%d bytes), probably corrupted", fstat.Size())
+		err = fmt.Errorf("the file size is too small (%d bytes), probably corrupted", fileSize)
 		return
 	}
 
-	p := min(fstat.Size(), int64(len(buf)))
-	_, err = i.file.Seek(-p, io.SeekEnd)
-	if err != nil {
-		err = fmt.Errorf("fst: %w", err)
-		return
-	}
+	p := min(fileSize, int64(len(buf)))
+	offset := fileSize - p
 
-	n, err := i.file.Read(buf)
+	n, err := i.mmapFile.ReadAt(buf, int64(offset))
 	if err != nil && !errors.Is(err, io.EOF) {
 		err = fmt.Errorf("read footer length: %w", err)
 		return
@@ -505,13 +508,9 @@ func (i *InvertedIndex[V]) readFooter() (
 
 	// read fst body
 	if fstLen > int64(n)-minMaxLen-totalSizes { // do we need to read more bytes?
-		_, err = i.file.Seek(-(fstLen + minMaxLen + totalSizes), io.SeekEnd)
-		if err != nil {
-			return
-		}
-
+		offset = fileSize - (fstLen + minMaxLen + totalSizes)
 		buf = make([]byte, fstLen)
-		_, err = i.file.Read(buf)
+		_, err = i.mmapFile.ReadAt(buf, offset)
 		if err != nil {
 			return
 		}
@@ -529,13 +528,9 @@ func (i *InvertedIndex[V]) readFooter() (
 
 	// read min-max values
 	if minMaxLen > int64(len(mmBuf)) { // do we need to read more bytes?
-		_, err = i.file.Seek(-(minMaxLen + totalSizes), io.SeekEnd)
-		if err != nil {
-			return
-		}
-
+		offset = fileSize - (minMaxLen + totalSizes)
 		mmBuf = make([]byte, minMaxLen)
-		_, err = i.file.Read(mmBuf)
+		_, err = i.mmapFile.ReadAt(mmBuf, offset)
 		if err != nil {
 			return
 		}
@@ -582,13 +577,7 @@ func (i *InvertedIndex[V]) readTermsBitmaps(terms []string) ([]*roaring.Bitmap, 
 
 func (i *InvertedIndex[V]) readValuesIndex() (index []segmentIndexEntry[V], err error) {
 	buf := make([]byte, 100)
-
-	_, err = i.file.Seek(i.indexOffset, io.SeekStart)
-	if err != nil {
-		return nil, fmt.Errorf("seek: %w", err)
-	}
-
-	n, err := i.file.Read(buf)
+	n, err := i.mmapFile.ReadAt(buf, i.indexOffset)
 	if err != nil {
 		return nil, fmt.Errorf("reading index len: %w", err)
 	}
@@ -599,7 +588,7 @@ func (i *InvertedIndex[V]) readValuesIndex() (index []segmentIndexEntry[V], err 
 		// index is only partially in the buf
 		moreSpace := indexLen + 8 - int64(n)
 		buf = append(buf, make([]byte, moreSpace)...)
-		_, err = i.file.Read(buf[n:])
+		_, err = i.mmapFile.ReadAt(buf, i.indexOffset)
 		if err != nil {
 			return nil, fmt.Errorf("reading index len: %w", err)
 		}
@@ -682,6 +671,8 @@ func (i *InvertedIndex[V]) makeSegmentsFetchFunc(
 
 		var retFunc func() ([]V, error)
 		retFunc = func() ([]V, error) {
+			var err error
+
 			// validate the current segment
 			if si == len(segments) {
 				return nil, go_iterators.EmptyIterator
@@ -690,18 +681,13 @@ func (i *InvertedIndex[V]) makeSegmentsFetchFunc(
 			s := &segments[si]
 
 			// read the segment
-			_, err := i.file.Seek(s.Offset, io.SeekStart)
-			if err != nil {
-				return nil, fmt.Errorf("read values segment failed: %w", err)
-			}
-
 			if int64(cap(segmentBuf)) < s.len {
 				segmentBuf = make([]byte, s.len)
 			} else {
 				segmentBuf = segmentBuf[:s.len]
 			}
 
-			_, err = i.file.Read(segmentBuf)
+			_, err = i.mmapFile.ReadAt(segmentBuf, s.Offset)
 			if err != nil {
 				return nil, fmt.Errorf("read values segment failed: %w", err)
 			}
@@ -756,6 +742,11 @@ func (i *InvertedIndex[V]) makeSegmentsFetchFunc(
 // readBitmaps populates internal cache with all bitmaps in the file
 func (i *InvertedIndex[V]) readBitmaps() error {
 
+	var (
+		err error
+		n   int
+	)
+
 	if i.bitmaps != nil { // already cached
 		return nil
 	}
@@ -766,15 +757,12 @@ func (i *InvertedIndex[V]) readBitmaps() error {
 	bitmapsLen := i.fstOffset - int64(fileBitmapsOffset)
 
 	// Load all bitmaps bytes into memory
-	_, err := i.file.Seek(int64(fileBitmapsOffset), io.SeekStart)
-	if err != nil {
-		return err
-	}
-
 	bitmapsMem := make([]byte, bitmapsLen)
-	_, err = i.file.Read(bitmapsMem)
+	n, err = i.mmapFile.ReadAt(bitmapsMem, int64(fileBitmapsOffset))
 	if err != nil {
 		return err
+	} else if int64(n) < bitmapsLen {
+		return fmt.Errorf("bitmap read: file is corrupted")
 	}
 
 	// now extract bitmaps for each term in FST
@@ -833,13 +821,13 @@ func OpenInvertedIndex[V constraints.Ordered](
 	file string,
 	unserializeValues func([]byte) ([]V, error),
 ) (InvertedIndexReader[V], error) {
-	f, err := os.Open(file)
+	f, err := mmap.Open(file)
 	if err != nil {
 		return nil, err
 	}
 
 	i := &InvertedIndex[V]{
-		file:               f,
+		mmapFile:           f,
 		fstBuf:             new(bytes.Buffer),
 		buf4:               make([]byte, 4),
 		unserializeSegment: unserializeValues,
