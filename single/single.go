@@ -77,7 +77,7 @@ type InvertedIndex[V cmp.Ordered] struct {
 		Writing makes a unique list of all values and generates bitmaps for each term in the index.
 		That allows to greatly reduce the index file size.
 	*/
-	termsValues [][]V // temporary values for each term
+	termsValues []termValues[V] // temporary values for each term
 
 	// Reader-mode -----------------------------------------------------
 	// Reads immutable data in the file
@@ -88,6 +88,11 @@ type InvertedIndex[V cmp.Ordered] struct {
 	// bitmaps cache stores all bitmaps indexed by file offsets
 	bitmaps       map[int64]*roaring.Bitmap
 	segmentsIndex []segmentIndexEntry[V]
+}
+
+type termValues[V constraints.Ordered] struct {
+	term   string
+	values []V
 }
 
 type InvertedIndexWriter[V constraints.Ordered] interface {
@@ -123,17 +128,15 @@ func (i *InvertedIndex[V]) Len() int64 { return i.filePos }
 // Put remembers all terms and its values, actual writing is delayed until Close()
 func (i *InvertedIndex[V]) Put(term string, values []V) error {
 
-	if i.lastTerm == term {
+	tv := termValues[V]{term, values}
+	j, ok := slices.BinarySearchFunc(i.termsValues, tv, func(a, b termValues[V]) int {
+		return cmp.Compare(a.term, b.term)
+	})
+	if ok {
 		return ErrDuplicateTerm
 	}
-	i.lastTerm = term
 
-	err := i.fstBuilder.Insert([]byte(term), uint64(len(i.termsValues)))
-	if err != nil {
-		return err
-	}
-
-	i.termsValues = append(i.termsValues, values)
+	i.termsValues = slicePutAt(i.termsValues, j, tv)
 
 	return nil
 }
@@ -213,28 +216,24 @@ func (i *InvertedIndex[V]) ReadTerms() (go_iterators.Iterator[string], error) {
 	return itWrap, nil
 }
 
-// getAllTermValues makes a single sorted slice of all unique values attached to terms
-func (i *InvertedIndex[V]) getAllTermValues() []V {
-	totalNum := 0
-	for _, tv := range i.termsValues {
-		totalNum += len(tv)
+// sliceSortUnique removes duplicates in place, returns sorted values
+// also see slices.Compact
+func sliceSortUnique[V constraints.Ordered](s []V) []V {
+	slices.Sort(s)
+
+	if len(s) == 0 {
+		return s
 	}
 
-	allValues := make([]V, 0, totalNum/2) // to avoid many allocations, start with 50% of total
-	for _, tv := range i.termsValues {
-		for _, v := range tv {
-
-			pos, exists := slices.BinarySearch(allValues, v)
-			if exists {
-				continue // skip duplication
-			}
-
-			// insert at the sorted position
-			allValues = slicePutAt(allValues, pos, v)
+	k := 1
+	for i := 1; i < len(s); i++ {
+		if s[i] != s[k-1] {
+			s[k] = s[i]
+			k++
 		}
 	}
 
-	return allValues
+	return s[:k]
 }
 
 // slicePutAt is an efficient insertion function that avoid unnecessary allocations
@@ -251,7 +250,7 @@ func (i *InvertedIndex[V]) mapTermValuesToBitmaps(allValues []V) []*roaring.Bitm
 
 	for _, tv := range i.termsValues {
 		pv = pv[:0]
-		for _, v := range tv {
+		for _, v := range tv.values {
 			p, _ := slices.BinarySearch(allValues, v)
 			pv = append(pv, uint32(p))
 		}
@@ -314,28 +313,16 @@ func (i *InvertedIndex[V]) writeAllValues(values []V) (valuesIndexOffset int64, 
 
 func (i *InvertedIndex[V]) writeTermsBitmapsAndUpdateFST(bitmaps []*roaring.Bitmap) error {
 
-	// use our existing fst to iterate through terms in the same order as they were ingested
-	fstBuf := make([]byte, i.fstBuf.Len())
-	copy(fstBuf, i.fstBuf.Bytes()) // copy since the buf will be reused later
-
-	fst, err := vellum.Load(fstBuf)
-	if err != nil {
-		return fmt.Errorf("fst read failed: %w", err)
-	}
-	i.fstBuf.Reset()
-
-	termsIt, err := fst.Iterator(nil, nil)
-	if err != nil {
-		return fmt.Errorf("fst iterator failed: %w", err)
-	}
+	var (
+		err error
+		n   int64
+	)
 
 	// here we create a new FST with actual bitmap offsets
 	// since we can't update the existing FST build with term numbers
 	i.fstBuilder, err = vellum.New(i.fstBuf, nil)
-	var n int64
-	for {
-		t, tn := termsIt.Current() // the value is the index of a term
-		err = i.fstBuilder.Insert(t, uint64(i.filePos))
+	for tn, tv := range i.termsValues {
+		err = i.fstBuilder.Insert([]byte(tv.term), uint64(i.filePos))
 		if err != nil {
 			return err
 		}
@@ -346,14 +333,8 @@ func (i *InvertedIndex[V]) writeTermsBitmapsAndUpdateFST(bitmaps []*roaring.Bitm
 			return err
 		}
 		i.filePos += n
-
-		err = termsIt.Next()
-		if err != nil && errors.Is(err, vellum.ErrIteratorDone) {
-			break
-		} else if err != nil {
-			return fmt.Errorf("fst iteration failed: %w", err)
-		}
 	}
+
 	err = i.fstBuilder.Close()
 	if err != nil {
 		return err
@@ -407,13 +388,23 @@ func (i *InvertedIndex[V]) writeFooter(valuesIndexOffset int64, fstL int) error 
 	return nil
 }
 
+// getAllTermValues makes a single sorted slice of all unique values attached to terms
+func (i *InvertedIndex[V]) getAllTermValues() []V {
+	totalNum := 0
+	for _, tv := range i.termsValues {
+		totalNum += len(tv.values)
+	}
+
+	allValues := make([]V, 0, totalNum)
+	for _, tv := range i.termsValues {
+		allValues = append(allValues, tv.values...)
+	}
+
+	return sliceSortUnique(allValues)
+}
+
 // write flushes all in-memory data to the file
 func (i *InvertedIndex[V]) write() error {
-
-	err := i.fstBuilder.Close()
-	if err != nil {
-		return fmt.Errorf("fst: %w", err)
-	}
 
 	allValues := i.getAllTermValues()
 
@@ -427,7 +418,6 @@ func (i *InvertedIndex[V]) write() error {
 	}
 
 	termBitmaps := i.mapTermValuesToBitmaps(allValues)
-	i.termsValues = nil // free up
 
 	valuesIndexOffset, err := i.writeAllValues(allValues)
 	if err != nil {
@@ -439,6 +429,7 @@ func (i *InvertedIndex[V]) write() error {
 	if err != nil {
 		return fmt.Errorf("writing bitmaps failed: %w", err)
 	}
+	i.termsValues = nil // free up
 
 	// write FST
 	fstL, err := i.file.Write(i.fstBuf.Bytes())
@@ -563,16 +554,10 @@ func (i *InvertedIndex[V]) readFooter() (
 func (i *InvertedIndex[V]) readTermsBitmaps(terms []string) ([]*roaring.Bitmap, error) {
 	slices.Sort(terms)
 
-	fstIt, err := i.fst.Iterator([]byte(terms[0]), nil)
-	if err != nil && !errors.Is(err, vellum.ErrIteratorDone) {
-		return nil, fmt.Errorf("read fst: %w", err)
-	} else if errors.Is(err, vellum.ErrIteratorDone) {
-		return nil, nil
-	}
-
 	var (
-		offset       uint64
-		existingTerm []byte
+		offset uint64
+		err    error
+		ok     bool
 	)
 
 	bitmaps := make([]*roaring.Bitmap, 0, len(terms))
@@ -580,21 +565,13 @@ func (i *InvertedIndex[V]) readTermsBitmaps(terms []string) ([]*roaring.Bitmap, 
 	for _, term := range terms {
 
 		// figure out term's bitmap file region
-		err = fstIt.Seek([]byte(term))
+		offset, ok, err = i.fst.Get([]byte(term))
 		if err != nil && !errors.Is(err, vellum.ErrIteratorDone) {
 			return nil, fmt.Errorf("fst seek term: %w", err)
 		} else if errors.Is(err, vellum.ErrIteratorDone) {
 			break // no further terms will match
-		}
-
-		existingTerm, offset = fstIt.Current()
-		if slices.Compare(existingTerm, []byte(term)) != 0 {
-			continue // the term is not in the index
-		}
-
-		err = fstIt.Next()
-		if err != nil && !errors.Is(err, vellum.ErrIteratorDone) {
-			return nil, fmt.Errorf("fst read: %w", err)
+		} else if !ok {
+			continue
 		}
 
 		bitmaps = append(bitmaps, i.bitmaps[int64(offset)])

@@ -2,7 +2,6 @@ package single
 
 import (
 	"fmt"
-	"github.com/blevesearch/vellum"
 	"github.com/lezhnev74/go-iterators"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/exp/rand"
@@ -70,14 +69,6 @@ func TestAPI(t *testing.T) {
 				terms := go_iterators.ToSlice(termsIterator)
 				require.EqualValues(t, []string{"term1", "term2"}, terms)
 			},
-		}, {
-			name:        "unordered terms error",
-			segmentSize: 1000,
-			prepare: func(w InvertedIndexWriter[int]) {
-				require.NoError(t, w.Put("term2", []int{1}))
-				require.ErrorIs(t, w.Put("term1", []int{1}), vellum.ErrOutOfOrder)
-			},
-			assert: func(r InvertedIndexReader[int]) {},
 		},
 		// ---- VALUES RELATED
 		{
